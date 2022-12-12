@@ -531,7 +531,7 @@ RSpec.describe Dependabot::Bundler::FileUpdater do
         end
       end
 
-      context "when the Gemfile.lock didn't have a BUNDLED WITH line" do
+      context "when the Gemfile.lock didn't have a BUNDLED WITH line", :bundler_v1_only do
         let(:project_name) { "no_bundled_with" }
 
         it "doesn't add in a BUNDLED WITH" do

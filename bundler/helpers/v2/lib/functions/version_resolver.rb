@@ -2,7 +2,10 @@
 
 module Functions
   class VersionResolver
+    class CyclicDependencyError < StandardError; end
+
     GEM_NOT_FOUND_ERROR_REGEX = /locked to (?<name>[^\s]+) \(/
+    CIRCULAR_DEPENDENCY_ERROR_REGEX = /Because (?<name>[^\s]+)(?: .*)?depends on itself/
 
     attr_reader :dependency_name, :dependency_requirements,
                 :gemfile_name, :lockfile_name
@@ -51,6 +54,8 @@ module Functions
       begin
         definition = build_definition(dependencies_to_unlock)
         definition.resolve_remotely!
+      rescue ::Bundler::SolveFailure => e
+        raise CyclicDependencyError, "package '#{extract_circular_dependency(e)}' depends on itself"
       rescue ::Bundler::GemNotFound => e
         unlock_yanked_gem(dependencies_to_unlock, e) && retry
       rescue ::Bundler::HTTPError => e
@@ -109,6 +114,12 @@ module Functions
       raise if dependencies_to_unlock.include?(gem_name)
 
       dependencies_to_unlock << gem_name
+    end
+
+    def extract_circular_dependency(error)
+      raise unless error.message.match?(CIRCULAR_DEPENDENCY_ERROR_REGEX)
+
+      error.message.match(CIRCULAR_DEPENDENCY_ERROR_REGEX).named_captures["name"]
     end
 
     def lockfile
