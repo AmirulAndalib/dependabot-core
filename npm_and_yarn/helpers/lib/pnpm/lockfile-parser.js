@@ -15,6 +15,10 @@ async function parse(directory) {
   });
 
   return Object.entries(lockfile.packages ?? {})
+    .filter(([depPath, pkgSnapshot]) => {
+      let dp = dependencyPath.parse(depPath);
+      return dp && dp.name // null or undefined checked for dependency path (dp) and empty name dps are filtered.
+    })
     .map(([depPath, pkgSnapshot]) => nameVerDevFromPkgSnapshot(depPath, pkgSnapshot, Object.values(lockfile.importers)))
 }
 
@@ -68,6 +72,7 @@ function nameVerDevFromPkgSnapshot(depPath, pkgSnapshot, projectSnapshots) {
   return {
     name: name,
     version: version,
+    resolved: pkgSnapshot.resolution.tarball,
     dev: pkgSnapshot.dev,
     specifiers: specifiers,
     aliased: aliased

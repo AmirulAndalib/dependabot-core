@@ -9,10 +9,12 @@ module Dependabot
     class LanguageVersionManager
       # This list must match the versions specified at the top of `python/Dockerfile`
       PRE_INSTALLED_PYTHON_VERSIONS = %w(
-        3.11.5
-        3.10.13
+        3.13.1
+        3.12.7
+        3.11.9
+        3.10.15
         3.9.18
-        3.8.18
+        3.8.20
       ).freeze
 
       def initialize(python_requirement_parser:)
@@ -28,8 +30,16 @@ module Dependabot
         )
       end
 
+      def installed_version
+        # Use `pyenv exec` to query the active Python version
+        output, _status = SharedHelpers.run_shell_command("pyenv exec python --version")
+        version = output.strip.split.last # Extract the version number (e.g., "3.13.1")
+
+        version
+      end
+
       def python_major_minor
-        @python_major_minor ||= Python::Version.new(python_version).segments[0..1].join(".")
+        @python_major_minor ||= T.must(Python::Version.new(python_version).segments[0..1]).join(".")
       end
 
       def python_version
@@ -57,7 +67,7 @@ module Dependabot
         requirement_string = requirement_string.gsub(/\.\d+$/, ".*") if requirement_string.start_with?(/\d/)
 
         # Try to match one of our pre-installed Python versions
-        requirement = Python::Requirement.requirements_array(requirement_string).first
+        requirement = T.must(Python::Requirement.requirements_array(requirement_string).first)
         version = PRE_INSTALLED_PYTHON_VERSIONS.find { |v| requirement.satisfied_by?(Python::Version.new(v)) }
         return version if version
 

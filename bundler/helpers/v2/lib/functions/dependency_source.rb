@@ -3,7 +3,8 @@
 
 module Functions
   class DependencySource
-    attr_reader :gemfile_name, :dependency_name
+    attr_reader :gemfile_name
+    attr_reader :dependency_name
 
     RUBYGEMS = "rubygems"
     PRIVATE_REGISTRY = "private"
@@ -42,9 +43,8 @@ module Functions
         .fetchers.flat_map do |fetcher|
           fetcher
             .specs([dependency_name], bundler_source)
-            .search_all(dependency_name)
+            .search_all(dependency_name).map(&:version)
         end
-        .map(&:version)
     end
 
     private

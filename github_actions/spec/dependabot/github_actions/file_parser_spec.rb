@@ -9,20 +9,6 @@ require "dependabot/dependency"
 require_common_spec "file_parsers/shared_examples_for_file_parsers"
 
 RSpec.describe Dependabot::GithubActions::FileParser do
-  it_behaves_like "a dependency file parser"
-
-  let(:files) { [workflow_files] }
-  let(:workflow_files) do
-    Dependabot::DependencyFile.new(
-      name: ".github/workflows/workflow.yml",
-      content: workflow_file_body
-    )
-  end
-  let(:workflow_file_body) do
-    fixture("workflow_files", workflow_file_fixture_name)
-  end
-  let(:workflow_file_fixture_name) { "workflow.yml" }
-  let(:parser) { described_class.new(dependency_files: files, source: source) }
   let(:source) do
     Dependabot::Source.new(
       provider: "github",
@@ -30,6 +16,20 @@ RSpec.describe Dependabot::GithubActions::FileParser do
       directory: "/"
     )
   end
+  let(:parser) { described_class.new(dependency_files: files, source: source) }
+  let(:workflow_file_fixture_name) { "workflow.yml" }
+  let(:workflow_file_body) do
+    fixture("workflow_files", workflow_file_fixture_name)
+  end
+  let(:workflow_files) do
+    Dependabot::DependencyFile.new(
+      name: ".github/workflows/workflow.yml",
+      content: workflow_file_body
+    )
+  end
+  let(:files) { [workflow_files] }
+
+  it_behaves_like "a dependency file parser"
 
   def mock_service_pack_request(nwo)
     stub_request(:get, "https://github.com/#{nwo}.git/info/refs?service=git-upload-pack")
@@ -54,6 +54,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
 
     describe "the first dependency" do
       subject(:dependency) { dependencies.first }
+
       let(:expected_requirements) do
         [{
           requirement: nil,
@@ -88,6 +89,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
 
       describe "the last dependency" do
         subject(:dependency) { dependencies.last }
+
         let(:expected_requirements) do
           [{
             requirement: nil,
@@ -125,6 +127,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
 
     describe "with multiple sources" do
       subject(:dependency) { dependencies.first }
+
       let(:workflow_file_fixture_name) { "multiple_sources.yml" }
 
       let(:expected_requirements) do
@@ -152,6 +155,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
 
     describe "with multiple sources pinned to different refs, and newest ref parsed first" do
       subject(:dependency) { dependencies.first }
+
       let(:workflow_file_fixture_name) { "newest_ref_parsed_first.yml" }
 
       let(:expected_requirements) do
@@ -190,6 +194,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
 
     describe "with reusable workflow" do
       subject(:dependency) { dependencies.first }
+
       let(:workflow_file_fixture_name) { "workflow_reusable.yml" }
 
       let(:expected_requirements) do
@@ -247,15 +252,15 @@ RSpec.describe Dependabot::GithubActions::FileParser do
         }]
       end
 
-      its(:length) { is_expected.to eq(4) }
-
       before do
         mock_service_pack_request("docker/setup-qemu-action")
         mock_service_pack_request("docker/setup-buildx-action")
         mock_service_pack_request("docker/login-action")
       end
 
-      context "the first dependency" do
+      its(:length) { is_expected.to eq(4) }
+
+      context "when dealing with the first dependency" do
         subject(:dependency) { dependencies.first }
 
         it "has the right details" do
@@ -269,6 +274,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
 
     describe "with empty" do
       subject(:dependency) { dependencies.first }
+
       let(:workflow_file_fixture_name) { "empty.yml" }
 
       it "has no dependencies" do
@@ -297,6 +303,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
 
     context "with a Docker url reference" do
       subject(:dependency) { dependencies.first }
+
       let(:workflow_file_fixture_name) { "docker_reference.yml" }
 
       it "ignores the Docker url reference" do
@@ -312,6 +319,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
 
       describe "the first dependency" do
         subject(:dependency) { dependencies.first }
+
         let(:expected_requirements) do
           [{
             requirement: nil,
@@ -359,6 +367,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
         "https://github.com/swatinem/rust-cache.git/info/refs" \
           "?service=git-upload-pack"
       end
+
       before do
         stub_request(:get, service_pack_url)
           .to_return(
@@ -380,6 +389,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
 
       describe "the first dependency" do
         subject(:dependency) { dependencies.first }
+
         let(:expected_requirements) do
           [{
             requirement: nil,
@@ -413,6 +423,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
         "https://github.com/actions/checkout.git/info/refs" \
           "?service=git-upload-pack"
       end
+
       before do
         stub_request(:get, service_pack_url)
           .to_return(
@@ -428,6 +439,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
 
       describe "the first dependency" do
         subject(:dependency) { dependencies.first }
+
         let(:expected_requirements) do
           [{
             requirement: nil,
@@ -467,6 +479,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
           api_endpoint: "https://ghes.other.com/api/v3"
         )
       end
+
       before do
         stub_request(:get, service_pack_url)
           .to_return(
@@ -482,6 +495,7 @@ RSpec.describe Dependabot::GithubActions::FileParser do
 
       describe "the first dependency" do
         subject(:dependency) { dependencies.first }
+
         let(:expected_requirements) do
           [{
             requirement: nil,
@@ -504,6 +518,79 @@ RSpec.describe Dependabot::GithubActions::FileParser do
           expect(dependency.requirements).to eq(expected_requirements)
         end
       end
+    end
+
+    context "with an inaccessible source" do
+      let(:workflow_file_fixture_name) { "inaccessible_source.yml" }
+
+      let(:service_pack_url) do
+        "https://github.com/inaccessible/source.git/info/refs" \
+          "?service=git-upload-pack"
+      end
+
+      before do
+        stub_request(:get, service_pack_url).to_return(status: 404)
+      end
+
+      its(:length) { is_expected.to eq(1) }
+
+      describe "the first dependency" do
+        subject(:dependency) { dependencies.first }
+
+        let(:expected_requirements) do
+          [{
+            requirement: nil,
+            groups: [],
+            file: ".github/workflows/workflow.yml",
+            source: {
+              type: "git",
+              url: "https://github.com/inaccessible/source",
+              ref: "v1",
+              branch: nil
+            },
+            metadata: { declaration_string: "inaccessible/source@v1" }
+          }]
+        end
+
+        it "has the right details" do
+          expect(dependency).to be_a(Dependabot::Dependency)
+          expect(dependency.name).to eq("inaccessible/source")
+          expect(dependency.version).to eq("1")
+          expect(dependency.requirements).to eq(expected_requirements)
+        end
+      end
+    end
+
+    context "with an unresolvable version" do
+      let(:workflow_file_fixture_name) { "unresolved_version.yml" }
+      let(:service_pack_url) do
+        "https://github.com/taiki-e/install-action.git/info/refs" \
+          "?service=git-upload-pack"
+      end
+
+      before do
+        mock_service_pack_request("taiki-e/install-action")
+      end
+
+      it "raises an UnresolvableVersionError error" do
+        expect { parser.parse }.to raise_error(
+          Dependabot::UnresolvableVersionError,
+          "Unable to determine semantic version from tags or commits for dependencies. " \
+          "Dependencies must have a tag or commit that references a semantic version. " \
+          "Affected dependencies: taiki-e/install-action"
+        )
+      end
+    end
+  end
+
+  describe "#ecosystem" do
+    it "returns the correct ecosystem" do
+      expect(parser.ecosystem).to be_a(Dependabot::Ecosystem)
+    end
+
+    it "returns package manager with version" do
+      expect(parser.ecosystem.package_manager).to be_a(Dependabot::GithubActions::PackageManager)
+      expect(parser.ecosystem.package_manager.version.to_s).to eq("1.0.0")
     end
   end
 end

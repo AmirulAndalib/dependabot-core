@@ -6,17 +6,7 @@ require "spec_helper"
 require "bundler/compact_index_client"
 require "bundler/compact_index_client/updater"
 
-RSpec.shared_context "without caching rubygems" do
-  before do
-    # Stub Bundler to stop it using a cached versions of Rubygems
-    allow_any_instance_of(Bundler::CompactIndexClient::Updater)
-      .to receive(:etag_for).and_return("")
-  end
-end
-
-RSpec.shared_context "stub rubygems compact index" do
-  include_context "without caching rubygems"
-
+RSpec.shared_context "when stubbing rubygems compact index" do
   before do
     # Stub the Rubygems index
     stub_request(:get, "https://index.rubygems.org/versions")
@@ -39,7 +29,7 @@ RSpec.shared_context "stub rubygems compact index" do
   end
 end
 
-RSpec.shared_context "stub rubygems versions api" do
+RSpec.shared_context "when stubbing rubygems versions api" do
   before do
     # Stub the Rubygems response for each dependency we have a fixture for
     fixtures =

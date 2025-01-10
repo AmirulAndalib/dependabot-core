@@ -38,15 +38,26 @@ module Dependabot
 
         private
 
-        attr_reader :dependency, :dependency_files, :repo_contents_path,
-                    :credentials, :target_version, :requirements_update_strategy,
-                    :options
+        attr_reader :dependency
+        attr_reader :dependency_files
+        attr_reader :repo_contents_path
+        attr_reader :credentials
+        attr_reader :target_version
+        attr_reader :requirements_update_strategy
+        attr_reader :options
 
         def update_multiple_dependencies?
           @update_multiple_dependencies
         end
 
         def force_update
+          requirement = dependency.requirements.find { |req| req[:file] == gemfile.name }
+          manifest_requirement_not_satisfied = requirement && !Requirement.satisfied_by?(requirement, target_version)
+
+          if manifest_requirement_not_satisfied && requirements_update_strategy.lockfile_only?
+            raise Dependabot::DependencyFileNotResolvable
+          end
+
           in_a_native_bundler_context(error_handling: false) do |tmp_dir|
             updated_deps, specs = NativeHelpers.run_bundler_subprocess(
               bundler_version: bundler_version,
@@ -63,25 +74,16 @@ module Dependabot
               }
             )
             dependencies_from(updated_deps, specs)
+          rescue SharedHelpers::HelperSubprocessFailed => e
+            msg = e.error_class + " with message: " + e.message
+            raise Dependabot::DependencyFileNotResolvable, msg
           end
-        rescue SharedHelpers::HelperSubprocessFailed => e
-          msg = e.error_class + " with message: " + e.message
-          raise Dependabot::DependencyFileNotResolvable, msg
         end
 
         def original_dependencies
           @original_dependencies ||=
             FileParser.new(
               dependency_files: dependency_files,
-              credentials: credentials,
-              source: nil
-            ).parse
-        end
-
-        def top_level_dependencies
-          @top_level_dependencies ||=
-            FileParser.new(
-              dependency_files: dependency_files.reject { |file| file.name == lockfile.name },
               credentials: credentials,
               source: nil
             ).parse
@@ -95,17 +97,14 @@ module Dependabot
           #
           # This is kind of a bug in Bundler, and we should try to fix it,
           # but resolving it won't necessarily be easy.
+          updated_deps.filter_map do |dep|
+            original_dep =
+              original_dependencies.find { |d| d.name == dep.fetch("name") }
+            spec = specs.find { |d| d.fetch("name") == dep.fetch("name") }
 
-          # put the lead dependency first
-          index = specs.index { |dep| dep["name"] == updated_deps.first["name"] }
-          specs.unshift(specs.delete_at(index))
-          specs.filter_map do |dep|
-            next unless top_level_dependencies.find { |d| d.name == dep.fetch("name") }
+            next if spec.fetch("version") == original_dep.version
 
-            original_dep = original_dependencies.find { |d| d.name == dep.fetch("name") }
-            next if dep.fetch("version") == original_dep.version
-
-            build_dependency(original_dep, dep)
+            build_dependency(original_dep, spec)
           end
         end
 

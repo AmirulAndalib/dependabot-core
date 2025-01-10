@@ -108,7 +108,7 @@ module Dependabot
       # NOTE: It's important that this *always* returns a tag (even if
       # it's the existing one) as it is what we later check the digest of.
       def fetch_latest_tag(version_tag)
-        return Tag.new(latest_digest) if version_tag.digest?
+        return Tag.new(latest_digest) if version_tag.digest? && latest_digest
         return version_tag unless version_tag.comparable?
 
         # Prune out any downgrade tags before checking for pre-releases
@@ -258,8 +258,10 @@ module Dependabot
         return false unless latest_tag
 
         if comparable_version_from(tag) > comparable_version_from(latest_tag)
-          Dependabot.logger.info "Tag with non-prerelease version name #{tag.name} detected as prerelease, " \
-                                 "because it sorts higher than #{latest_tag.name}."
+          Dependabot.logger.info \
+            "The `latest` tag points to the same image as the `#{latest_tag.name}` image, " \
+            "so dependabot is treating `#{tag.name}` as a pre-release. " \
+            "The `latest` tag needs to point to `#{tag.name}` for Dependabot to consider it."
 
           true
         else
@@ -272,7 +274,9 @@ module Dependabot
       end
 
       def registry_hostname
-        return dependency.requirements.first[:source][:registry] if dependency.requirements.first[:source][:registry]
+        if dependency.requirements.first&.dig(:source, :registry)
+          return T.must(dependency.requirements.first).dig(:source, :registry)
+        end
 
         credentials_finder.base_registry
       end
@@ -353,7 +357,7 @@ module Dependabot
       end
 
       def version_tag
-        @version_tag ||= Tag.new(dependency.version)
+        @version_tag ||= Tag.new(T.must(dependency.version))
       end
     end
   end

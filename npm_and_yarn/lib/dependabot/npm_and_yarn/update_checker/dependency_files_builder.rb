@@ -15,7 +15,7 @@ module Dependabot
         end
 
         def write_temporary_dependency_files
-          write_lock_files
+          write_lockfiles
 
           if Helpers.yarn_berry?(yarn_locks.first)
             File.write(".yarnrc.yml", yarnrc_yml_content) if yarnrc_yml_file
@@ -79,9 +79,11 @@ module Dependabot
 
         private
 
-        attr_reader :dependency, :dependency_files, :credentials
+        attr_reader :dependency
+        attr_reader :dependency_files
+        attr_reader :credentials
 
-        def write_lock_files
+        def write_lockfiles
           yarn_locks.each do |f|
             FileUtils.mkdir_p(Pathname.new(f.name).dirname)
             File.write(f.name, prepared_yarn_lockfile_content(f.content))
@@ -112,7 +114,7 @@ module Dependabot
           return false unless yarnrc_global_registry
 
           UpdateChecker::RegistryFinder::CENTRAL_REGISTRIES.none? do |r|
-            r.include?(URI(yarnrc_global_registry).host)
+            r.include?(T.must(URI(yarnrc_global_registry).host))
           end
         end
 

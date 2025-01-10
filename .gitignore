@@ -5,10 +5,6 @@ node_modules/
 /tmp
 /pkg
 /dependabot-*.gem
-!bundler/spec/fixtures/projects/**/Gemfile.lock
-Gemfile.lock
-!updater/spec/fixtures/**/Gemfile.lock
-!updater/Gemfile.lock
 vendor
 !common/spec/fixtures/projects/**/*/vendor
 !go_modules/spec/fixtures/projects/**/*
@@ -33,3 +29,6 @@ coverage/
 # Ignore spoom coverage report
 spoom_data/
 spoom_report.html
+.vs/
+# Ignore VSCode C# Dev Kit
+**/.mono/**/values.xml
