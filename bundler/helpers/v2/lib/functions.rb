@@ -152,6 +152,9 @@ module Functions
     Bundler.ui = Bundler::UI::Silent.new
 
     Bundler.settings.set_command_option("forget_cli_options", "true")
+
+    # Native helpers rely on dependency unlocking, so Bundler should never be frozen
+    Bundler.settings.set_command_option("frozen", "false")
   end
 
   def self.relevant_credentials(credentials)
@@ -169,5 +172,13 @@ module Functions
   def self.git_source_credentials(credentials)
     credentials
       .select { |cred| cred["type"] == "git_source" }
+  end
+
+  def self.bundler_raw_version
+    Bundler::VERSION
+  end
+
+  def self.ruby_raw_version
+    RUBY_VERSION
   end
 end

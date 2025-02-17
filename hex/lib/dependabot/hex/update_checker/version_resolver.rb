@@ -27,8 +27,10 @@ module Dependabot
 
         private
 
-        attr_reader :dependency, :credentials,
-                    :original_dependency_files, :prepared_dependency_files
+        attr_reader :dependency
+        attr_reader :credentials
+        attr_reader :original_dependency_files
+        attr_reader :prepared_dependency_files
 
         def fetch_latest_resolvable_version
           latest_resolvable_version =
@@ -76,7 +78,7 @@ module Dependabot
             raise Dependabot::PrivateSourceAuthenticationFailure, match[:repo]
           end
 
-          if (match = error.message.match(/Failed to fetch record for '(?<repo>[a-z_]+)(?::(?<org>[a-z_]+))?/))
+          if (match = error.message.match(/Failed to fetch record for (?<repo>[a-z_]+)(?::(?<org>[a-z_]+))?/))
             name = match[:org] || match[:repo]
             raise Dependabot::PrivateSourceAuthenticationFailure, name
           end
@@ -165,8 +167,6 @@ module Dependabot
         def mix_env
           {
             "MIX_EXS" => File.join(NativeHelpers.hex_helpers_dir, "mix.exs"),
-            "MIX_LOCK" => File.join(NativeHelpers.hex_helpers_dir, "mix.lock"),
-            "MIX_DEPS" => File.join(NativeHelpers.hex_helpers_dir, "deps"),
             "MIX_QUIET" => "1"
           }
         end

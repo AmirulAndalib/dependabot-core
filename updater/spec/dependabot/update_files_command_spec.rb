@@ -3,6 +3,7 @@
 
 require "spec_helper"
 require "dependabot/update_files_command"
+require "dependabot/bundler"
 require "tmpdir"
 
 RSpec.describe Dependabot::UpdateFilesCommand do
@@ -15,7 +16,8 @@ RSpec.describe Dependabot::UpdateFilesCommand do
                     record_update_job_error: nil,
                     record_update_job_unknown_error: nil,
                     update_dependency_list: nil,
-                    increment_metric: nil)
+                    increment_metric: nil,
+                    wait_for_calls_to_finish: nil)
   end
   let(:job_definition) do
     JSON.parse(fixture("file_fetcher_output/output.json"))
@@ -24,10 +26,8 @@ RSpec.describe Dependabot::UpdateFilesCommand do
 
   before do
     allow(Dependabot::Service).to receive(:new).and_return(service)
-    allow(Dependabot::Environment).to receive(:job_id).and_return(job_id)
-    allow(Dependabot::Environment).to receive(:job_token).and_return("mock_token")
-    allow(Dependabot::Environment).to receive(:job_definition).and_return(job_definition)
-    allow(Dependabot::Environment).to receive(:repo_contents_path).and_return(nil)
+    allow(Dependabot::Environment).to receive_messages(job_id: job_id, job_token: "mock_token",
+                                                       job_definition: job_definition, repo_contents_path: nil)
   end
 
   describe "#perform_job" do
@@ -100,7 +100,7 @@ RSpec.describe Dependabot::UpdateFilesCommand do
     before do
       allow(Dependabot.logger).to receive(:info)
       allow(Dependabot.logger).to receive(:error)
-      allow(Raven).to receive(:capture_exception)
+      allow(Sentry).to receive(:capture_exception)
       allow(Dependabot::DependencySnapshot).to receive(:create_from_job_definition).and_raise(error)
     end
 
@@ -113,42 +113,73 @@ RSpec.describe Dependabot::UpdateFilesCommand do
       end
     end
 
-    context "with an update files error (cloud)" do
-      let(:error) { StandardError.new("hell") }
-      before do
-        allow(Dependabot::Experiments).to receive(:enabled?).with(:record_update_job_unknown_error).and_return(true)
+    context "when there is an unsupported package manager version" do
+      let(:error) do
+        Dependabot::ToolVersionNotSupported.new(
+          "bundler",       # tool name
+          "1.0.0",         # detected version
+          ">= 2.0.0"       # supported versions
+        )
       end
 
       it_behaves_like "a fast-failed job"
 
-      it "it captures the exception and records to a update job error api" do
+      it "records the unsupported version error with details" do
+        expect(service).to receive(:record_update_job_error).with(
+          error_type: "tool_version_not_supported",
+          error_details: {
+            "tool-name": "bundler",
+            "detected-version": "1.0.0",
+            "supported-versions": ">= 2.0.0"
+          }
+        )
+        expect(service).to receive(:mark_job_as_processed)
+
+        perform_job
+      end
+    end
+
+    context "with an update files error (cloud)" do
+      let(:error) { StandardError.new("hell") }
+
+      before do
+        Dependabot::Experiments.register(:record_update_job_unknown_error, true)
+      end
+
+      after do
+        Dependabot::Experiments.reset!
+      end
+
+      it_behaves_like "a fast-failed job"
+
+      it "captures the exception and records to a update job error api" do
         expect(service).to receive(:capture_exception)
         expect(service).to receive(:record_update_job_error).with(
           error_type: "update_files_error",
           error_details: {
-            "error-backtrace" => an_instance_of(String),
-            "error-message" => "hell",
-            "error-class" => "StandardError",
-            "package-manager" => "bundler",
-            "job-id" => "123123",
-            "job-dependency_group" => []
+            Dependabot::ErrorAttributes::BACKTRACE => an_instance_of(String),
+            Dependabot::ErrorAttributes::MESSAGE => "hell",
+            Dependabot::ErrorAttributes::CLASS => "StandardError",
+            Dependabot::ErrorAttributes::PACKAGE_MANAGER => "bundler",
+            Dependabot::ErrorAttributes::JOB_ID => "123123",
+            Dependabot::ErrorAttributes::DEPENDENCY_GROUPS => []
           }
         )
 
         perform_job
       end
 
-      it "it captures the exception and records the a update job unknown error api" do
+      it "captures the exception and records the a update job unknown error api" do
         expect(service).to receive(:capture_exception)
         expect(service).to receive(:record_update_job_unknown_error).with(
           error_type: "update_files_error",
           error_details: {
-            "error-backtrace" => an_instance_of(String),
-            "error-message" => "hell",
-            "error-class" => "StandardError",
-            "package-manager" => "bundler",
-            "job-id" => "123123",
-            "job-dependency_group" => []
+            Dependabot::ErrorAttributes::BACKTRACE => an_instance_of(String),
+            Dependabot::ErrorAttributes::MESSAGE => "hell",
+            Dependabot::ErrorAttributes::CLASS => "StandardError",
+            Dependabot::ErrorAttributes::PACKAGE_MANAGER => "bundler",
+            Dependabot::ErrorAttributes::JOB_ID => "123123",
+            Dependabot::ErrorAttributes::DEPENDENCY_GROUPS => []
           }
         )
 
@@ -160,32 +191,28 @@ RSpec.describe Dependabot::UpdateFilesCommand do
     context "with an update files error (ghes)" do
       let(:error) { StandardError.new("hell") }
 
-      before do
-        allow(Dependabot::Experiments).to receive(:enabled?).with(:record_update_job_unknown_error).and_return(false)
-      end
-
       it_behaves_like "a fast-failed job"
 
-      it "it captures the exception and records to a update job error api" do
+      it "captures the exception and records to a update job error api" do
         expect(service).to receive(:capture_exception)
         expect(service).to receive(:record_update_job_error).with(
           error_type: "update_files_error",
           error_details: {
-            "error-backtrace" => an_instance_of(String),
-            "error-message" => "hell",
-            "error-class" => "StandardError",
-            "package-manager" => "bundler",
-            "job-id" => "123123",
-            "job-dependency_group" => []
+            Dependabot::ErrorAttributes::BACKTRACE => an_instance_of(String),
+            Dependabot::ErrorAttributes::MESSAGE => "hell",
+            Dependabot::ErrorAttributes::CLASS => "StandardError",
+            Dependabot::ErrorAttributes::PACKAGE_MANAGER => "bundler",
+            Dependabot::ErrorAttributes::JOB_ID => "123123",
+            Dependabot::ErrorAttributes::DEPENDENCY_GROUPS => []
           }
         )
 
         perform_job
       end
 
-      it "it captures the exception and does not records the update job unknown error api" do
+      it "captures the exception and does not records the update job unknown error api" do
         expect(service).to receive(:capture_exception)
-        expect(service).to_not receive(:record_update_job_unknown_error)
+        expect(service).not_to receive(:record_update_job_unknown_error)
 
         perform_job
         Dependabot::Experiments.reset!
@@ -269,6 +296,38 @@ RSpec.describe Dependabot::UpdateFilesCommand do
       end
     end
 
+    context "with a Dependabot::DependencyFileNotParseable error" do
+      let(:error) { Dependabot::DependencyFileNotParseable.new("path/to/file", "a") }
+
+      let(:snapshot) do
+        instance_double(Dependabot::DependencySnapshot,
+                        base_commit_sha: "1c6331732c41e4557a16dacb82534f1d1c831848")
+      end
+
+      let(:updater) do
+        instance_double(Dependabot::Updater,
+                        service: service,
+                        job: job,
+                        dependency_snapshot: snapshot)
+      end
+
+      before do
+        allow(Dependabot::DependencySnapshot).to receive(:create_from_job_definition).and_return(snapshot)
+        allow(Dependabot::Updater).to receive(:new).and_return(updater)
+        allow(updater).to receive(:run).and_raise(error)
+      end
+
+      it "only records a job error" do
+        expect(service).not_to receive(:capture_exception)
+        expect(service).to receive(:record_update_job_error).with(
+          error_type: "dependency_file_not_parseable",
+          error_details: { "file-path": "path/to/file", message: "a" }
+        )
+
+        perform_job
+      end
+    end
+
     context "with a Dependabot::DependencyFileNotFound error" do
       let(:error) { Dependabot::DependencyFileNotFound.new("path/to/file") }
 
@@ -278,7 +337,10 @@ RSpec.describe Dependabot::UpdateFilesCommand do
         expect(service).not_to receive(:capture_exception)
         expect(service).to receive(:record_update_job_error).with(
           error_type: "dependency_file_not_found",
-          error_details: { "file-path": "path/to/file" }
+          error_details: {
+            message: "path/to/file not found",
+            "file-path": "path/to/file"
+          }
         )
 
         perform_job
