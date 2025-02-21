@@ -1,24 +1,29 @@
-# typed: true
+# typed: strict
 # frozen_string_literal: true
 
 require "dependabot/logger"
 require "dependabot/python/version"
+require "sorbet-runtime"
 
 module Dependabot
   module Python
     class LanguageVersionManager
+      extend T::Sig
       # This list must match the versions specified at the top of `python/Dockerfile`
       PRE_INSTALLED_PYTHON_VERSIONS = %w(
-        3.11.5
-        3.10.13
-        3.9.18
-        3.8.18
+        3.13.2
+        3.12.9
+        3.11.11
+        3.10.16
+        3.9.21
       ).freeze
 
+      sig { params(python_requirement_parser: T.untyped).void }
       def initialize(python_requirement_parser:)
         @python_requirement_parser = python_requirement_parser
       end
 
+      sig { returns(T.nilable(String)) }
       def install_required_python
         # The leading space is important in the version check
         return if SharedHelpers.run_shell_command("pyenv versions").include?(" #{python_major_minor}.")
@@ -28,14 +33,26 @@ module Dependabot
         )
       end
 
+      sig { returns(String) }
+      def installed_version
+        # Use `pyenv exec` to query the active Python version
+        output, _status = SharedHelpers.run_shell_command("pyenv exec python --version")
+        version = output.strip.split.last # Extract the version number (e.g., "3.13.1")
+
+        T.must(version)
+      end
+
+      sig { returns(T.untyped) }
       def python_major_minor
-        @python_major_minor ||= Python::Version.new(python_version).segments[0..1].join(".")
+        @python_major_minor ||= T.let(T.must(Python::Version.new(python_version).segments[0..1]).join("."), T.untyped)
       end
 
+      sig { returns(String) }
       def python_version
-        @python_version ||= python_version_from_supported_versions
+        @python_version ||= T.let(python_version_from_supported_versions, T.nilable(String))
       end
 
+      sig { returns(String) }
       def python_requirement_string
         if user_specified_python_version
           if user_specified_python_version.start_with?(/\d/)
@@ -49,6 +66,7 @@ module Dependabot
         end
       end
 
+      sig { returns(String) }
       def python_version_from_supported_versions
         requirement_string = python_requirement_string
 
@@ -57,7 +75,7 @@ module Dependabot
         requirement_string = requirement_string.gsub(/\.\d+$/, ".*") if requirement_string.start_with?(/\d/)
 
         # Try to match one of our pre-installed Python versions
-        requirement = Python::Requirement.requirements_array(requirement_string).first
+        requirement = T.must(Python::Requirement.requirements_array(requirement_string).first)
         version = PRE_INSTALLED_PYTHON_VERSIONS.find { |v| requirement.satisfied_by?(Python::Version.new(v)) }
         return version if version
 
@@ -66,10 +84,12 @@ module Dependabot
         raise ToolVersionNotSupported.new("Python", python_requirement_string, supported_versions)
       end
 
+      sig { returns(T.untyped) }
       def user_specified_python_version
         @python_requirement_parser.user_specified_requirements.first
       end
 
+      sig { returns(T.nilable(String)) }
       def python_version_matching_imputed_requirements
         compiled_file_python_requirement_markers =
           @python_requirement_parser.imputed_requirements.map do |r|
@@ -78,6 +98,7 @@ module Dependabot
         python_version_matching(compiled_file_python_requirement_markers)
       end
 
+      sig { params(requirements: T.untyped).returns(T.nilable(String)) }
       def python_version_matching(requirements)
         PRE_INSTALLED_PYTHON_VERSIONS.find do |version_string|
           version = Python::Version.new(version_string)

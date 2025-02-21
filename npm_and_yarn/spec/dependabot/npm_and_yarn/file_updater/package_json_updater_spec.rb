@@ -98,7 +98,7 @@ RSpec.describe Dependabot::NpmAndYarn::FileUpdater::PackageJsonUpdater do
         is_expected.to eq(fixture("projects", "npm8", "minor_version_specified", "package.json"))
       end
 
-      context "except for the source" do
+      context "when not changed for the source" do
         let(:dependency) do
           Dependabot::Dependency.new(
             name: "fetch-factory",
@@ -157,7 +157,7 @@ RSpec.describe Dependabot::NpmAndYarn::FileUpdater::PackageJsonUpdater do
       end
     end
 
-    context "updating multiple dependencies" do
+    context "when updating multiple dependencies" do
       let(:project_name) { "npm8/simple" }
       let(:dependencies) do
         [
@@ -203,6 +203,61 @@ RSpec.describe Dependabot::NpmAndYarn::FileUpdater::PackageJsonUpdater do
         expect(parsed_file.dig("dependencies", "etag")).to be_nil
         expect(parsed_file.dig("devDependencies", "etag")).to eq("^1.8.1")
         expect(parsed_file.dig("dependencies", "fetch-factory")).to eq("^0.0.2")
+      end
+    end
+
+    context "when updating multiple dependencies that results in 'package.json' update only once" do
+      before do
+        Dependabot::Experiments.register(:avoid_duplicate_updates_package_json, true)
+      end
+
+      after do
+        Dependabot::Experiments.register(:avoid_duplicate_updates_package_json, false)
+      end
+
+      let(:project_name) { "npm8/simple_with_multiple_deps" }
+      let(:dependencies) do
+        [
+          Dependabot::Dependency.new(
+            name: "cross-spawn",
+            version: "^7.0.2",
+            package_manager: "npm_and_yarn",
+            requirements: [{
+              file: "package.json",
+              requirement: "^7.0.6",
+              groups: ["dependencies"],
+              source: nil
+            }],
+            previous_requirements: [{
+              file: "package.json",
+              requirement: "^7.0.2",
+              groups: ["dependencies"],
+              source: nil
+            }]
+          ),
+          Dependabot::Dependency.new(
+            name: "dep-spawn",
+            version: "^6.0.2",
+            package_manager: "npm_and_yarn",
+            requirements: [{
+              file: "package.json",
+              requirement: "^6.0.2",
+              groups: ["dependencies"],
+              source: nil
+            }],
+            previous_requirements: [{
+              file: "package.json",
+              requirement: "^6.0.1",
+              groups: ["dependencies"],
+              source: nil
+            }]
+          )
+        ]
+      end
+
+      it "updates both dependency declarations" do
+        expect { updated_package_json }
+          .to raise_error("Expected content to change!")
       end
     end
 
@@ -354,7 +409,7 @@ RSpec.describe Dependabot::NpmAndYarn::FileUpdater::PackageJsonUpdater do
 
       its(:content) { is_expected.to include("jonschlinkert/is-number#4.0.0") }
 
-      context "that specifies a semver requirement" do
+      context "when it specifies a semver requirement" do
         let(:project_name) { "npm8/github_dependency_semver" }
         let(:dependency) do
           Dependabot::Dependency.new(
@@ -423,6 +478,7 @@ RSpec.describe Dependabot::NpmAndYarn::FileUpdater::PackageJsonUpdater do
       end
 
       its(:content) { is_expected.to include '"lodash": "^1.3.1"' }
+
       its(:content) do
         is_expected.to include '"etag": "file:./deps/etag"'
       end
@@ -433,6 +489,62 @@ RSpec.describe Dependabot::NpmAndYarn::FileUpdater::PackageJsonUpdater do
 
       its(:content) do
         is_expected.to include %("*.js": ["eslint --fix", "git add"])
+      end
+    end
+
+    context "with a path-based dependency that is in dependency list" do
+      let(:project_name) { "npm8/path_dependency" }
+      let(:dependency) do
+        Dependabot::Dependency.new(
+          name: "etag",
+          version: "file:./deps/etag",
+          package_manager: "npm_and_yarn",
+          requirements: [{
+            file: "package.json",
+            requirement: "^file:./deps/etag",
+            groups: ["dependencies"],
+            source: nil
+          }],
+          previous_requirements: [{
+            file: "package.json",
+            requirement: "file:./deps/etag",
+            groups: ["dependencies"],
+            source: nil
+          }]
+        )
+      end
+
+      it "exits update with relevant exception" do
+        expect { updated_package_json }
+          .to raise_error(Dependabot::DependencyFileNotResolvable)
+      end
+    end
+
+    context "with a patched dependency that is in dependency list" do
+      let(:project_name) { "npm8/path_dependency" }
+      let(:dependency) do
+        Dependabot::Dependency.new(
+          name: "etag",
+          version: "patch:./deps/etag",
+          package_manager: "npm_and_yarn",
+          requirements: [{
+            file: "package.json",
+            requirement: "patch:./deps/etag",
+            groups: ["dependencies"],
+            source: nil
+          }],
+          previous_requirements: [{
+            file: "package.json",
+            requirement: "patch:./deps/etag",
+            groups: ["dependencies"],
+            source: nil
+          }]
+        )
+      end
+
+      it "exits update with relevant exception" do
+        expect { updated_package_json }
+          .to raise_error(Dependabot::DependencyFileNotResolvable)
       end
     end
   end
