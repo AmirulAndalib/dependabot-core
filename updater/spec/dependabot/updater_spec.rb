@@ -11,6 +11,8 @@ require "dependabot/file_fetchers"
 require "dependabot/updater"
 require "dependabot/service"
 
+require "dependabot/bundler"
+
 ### DO NOT ADD NEW TESTS TO THIS FILE
 #
 # This file tests all of our specific Dependabot::Updater::Operations via the
@@ -190,7 +192,7 @@ RSpec.describe Dependabot::Updater do
 
     context "when the checker has an requirements update strategy" do
       it "logs the update requirements and strategy" do
-        stub_update_checker(requirements_update_strategy: :bump_versions)
+        stub_update_checker(requirements_update_strategy: Dependabot::RequirementsUpdateStrategy::BumpVersions)
 
         job = build_job
         service = build_service
@@ -239,34 +241,12 @@ RSpec.describe Dependabot::Updater do
         expect(Dependabot.logger)
           .to receive(:info)
           .with("Found no dependencies to update after filtering " \
-                "allowed updates")
+                "allowed updates in /")
         updater.run
       end
     end
 
-    context "for security only updates" do
-      it "creates the pull request" do
-        stub_update_checker(vulnerable?: true)
-
-        job = build_job(
-          requested_dependencies: ["dummy-pkg-b"],
-          security_advisories: [
-            {
-              "dependency-name" => "dummy-pkg-b",
-              "affected-versions" => ["1.1.0"],
-              "patched-versions" => ["1.2.0"]
-            }
-          ],
-          security_updates_only: true
-        )
-        service = build_service
-        updater = build_updater(service: service, job: job)
-
-        expect(service).to receive(:create_pull_request).once
-
-        updater.run
-      end
-
+    context "when dealing with a security only updates" do
       context "when the dep has no version so we can't check vulnerability" do
         it "does not create pull request" do
           stub_update_checker(
@@ -299,7 +279,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(service).to_not receive(:create_pull_request)
+          expect(service).not_to receive(:create_pull_request)
           expect(service).to receive(:record_update_job_error).with(
             {
               error_type: "dependency_file_not_supported",
@@ -314,30 +294,6 @@ RSpec.describe Dependabot::Updater do
               "projects without a lockfile or pinned version requirement as " \
               "the currently installed version of dummy-pkg-b isn't known."
             )
-
-          updater.run
-        end
-      end
-
-      context "when the dependency is no longer vulnerable" do
-        it "does not create pull request" do
-          stub_update_checker(vulnerable?: false)
-
-          job = build_job(
-            requested_dependencies: ["dummy-pkg-b"],
-            security_advisories: [
-              {
-                "dependency-name" => "dummy-pkg-b",
-                "affected-versions" => ["1.1.0"],
-                "patched-versions" => ["1.1.0"]
-              }
-            ],
-            security_updates_only: true
-          )
-          service = build_service
-          updater = build_updater(service: service, job: job)
-
-          expect(service).to_not receive(:create_pull_request)
 
           updater.run
         end
@@ -376,7 +332,7 @@ RSpec.describe Dependabot::Updater do
             ]
           )
 
-          expect(service).to_not receive(:create_pull_request)
+          expect(service).not_to receive(:create_pull_request)
           expect(service).to receive(:record_update_job_error).with(
             {
               error_type: "security_update_not_possible",
@@ -406,16 +362,23 @@ RSpec.describe Dependabot::Updater do
 
           updater.run
         end
+      end
 
-        it "reports the correct error when there is no fixed version" do
-          checker = stub_update_checker(vulnerable?: true)
+      context "when the update is not possible because the version is required via a transitive dependency" do
+        it "does not create pull request" do
+          exp_msg = "dummy-pkg-c@1.2.0 requires dummy-pkg-b@1.1.0 via a transitive dependency on dummy-pkg-a@1.2.0"
+          conflict = [{ "explanation" => exp_msg,
+                        "name" => "dummy-pkg-a",
+                        "version" => "1.1.0",
+                        "requirement" => "1.2.0" }]
+          checker = stub_update_checker(vulnerable?: true, conflicting_dependencies: conflict)
 
           job = build_job(
             requested_dependencies: ["dummy-pkg-b"],
             security_advisories: [
               {
                 "dependency-name" => "dummy-pkg-b",
-                "affected-versions" => ["1.1.0", "1.2.0"]
+                "affected-versions" => ["1.1.0"]
               }
             ],
             security_updates_only: true
@@ -424,68 +387,36 @@ RSpec.describe Dependabot::Updater do
           updater = build_updater(service: service, job: job)
 
           expect(checker).to receive(:lowest_resolvable_security_fix_version)
-            .and_return(nil)
+            .and_return("1.1.0")
           expect(checker).to receive(:lowest_security_fix_version)
-            .and_return(nil)
-          expect(checker).to receive(:conflicting_dependencies).and_return([])
+            .and_return(Dependabot::Bundler::Version.new("1.2.0"))
 
-          expect(service).to_not receive(:create_pull_request)
+          expect(service).not_to receive(:create_pull_request)
           expect(service).to receive(:record_update_job_error).with(
             {
-              error_type: "security_update_not_possible",
+              error_type: "transitive_update_not_possible",
               error_details: {
                 "dependency-name": "dummy-pkg-b",
                 "latest-resolvable-version": "1.1.0",
-                "lowest-non-vulnerable-version": nil,
-                "conflicting-dependencies": []
+                "lowest-non-vulnerable-version": "1.2.0",
+                "conflicting-dependencies": [
+                  {
+                    "explanation" =>
+                      "dummy-pkg-c@1.2.0 requires dummy-pkg-b@1.1.0 via a transitive dependency on dummy-pkg-a@1.2.0",
+                    "name" => "dummy-pkg-a",
+                    "version" => "1.1.0",
+                    "requirement" => "1.2.0"
+                  }
+                ]
               }
             }
           )
           expect(Dependabot.logger)
             .to receive(:info).with(
-              "The latest possible version of dummy-pkg-b that can be " \
-              "installed is 1.1.0"
-            )
-
-          updater.run
-        end
-      end
-
-      context "when the dependency is deemed up-to-date but still vulnerable" do
-        it "doesn't update the dependency" do
-          checker = stub_update_checker(vulnerable?: true, up_to_date?: true)
-
-          job = build_job(
-            requested_dependencies: ["dummy-pkg-b"],
-            security_advisories: [
-              {
-                "dependency-name" => "dummy-pkg-b",
-                "affected-versions" => ["1.1.0", "1.2.0"]
-              }
-            ],
-            security_updates_only: true
-          )
-          service = build_service
-          updater = build_updater(service: service, job: job)
-
-          expect(checker).to receive(:up_to_date?).and_return(true)
-          expect(Dependabot::DependencyChangeBuilder).to_not receive(:create_from)
-          expect(service).to_not receive(:create_pull_request)
-          expect(service).to receive(:record_update_job_error)
-            .with(
-              error_type: "security_update_not_found",
-              error_details: {
-                "dependency-name": "dummy-pkg-b",
-                "dependency-version": "1.1.0"
-              },
-              dependency: an_instance_of(Dependabot::Dependency)
-            )
-          expect(Dependabot.logger)
-            .to receive(:info)
-            .with(
-              "Dependabot can't find a published or compatible " \
-              "non-vulnerable version for dummy-pkg-b. " \
-              "The latest available version is 1.1.0"
+              "The latest possible version that can be installed is " \
+              "1.1.0 because of the following conflicting dependency:\n" \
+              "\n" \
+              "  dummy-pkg-c@1.2.0 requires dummy-pkg-b@1.1.0 via a transitive dependency on dummy-pkg-a@1.2.0"
             )
 
           updater.run
@@ -590,7 +521,7 @@ RSpec.describe Dependabot::Updater do
 
           updater.run
 
-          expect(service).to_not have_received(:record_update_job_error)
+          expect(service).not_to have_received(:record_update_job_error)
         end
       end
 
@@ -783,15 +714,7 @@ RSpec.describe Dependabot::Updater do
           ],
           dependency_files: default_dependency_files,
           repo_contents_path: nil,
-          credentials: [
-            {
-              "type" => "git_source",
-              "host" => "github.com",
-              "username" => "x-access-token",
-              "password" => "github-token"
-            },
-            { "type" => "random", "secret" => "codes" }
-          ],
+          credentials: anything,
           options: { cloning: true }
         ).and_call_original
 
@@ -871,8 +794,8 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Dependabot::DependencyChangeBuilder).to_not receive(:create_from)
-          expect(service).to_not receive(:create_pull_request)
+          expect(Dependabot::DependencyChangeBuilder).not_to receive(:create_from)
+          expect(service).not_to receive(:create_pull_request)
 
           updater.run
         end
@@ -976,10 +899,10 @@ RSpec.describe Dependabot::Updater do
         service = build_service
         updater = build_updater(service: service, job: job)
 
-        expect(checker).to_not receive(:can_update?)
-        expect(Dependabot::DependencyChangeBuilder).to_not receive(:create_from)
-        expect(service).to_not receive(:create_pull_request)
-        expect(service).to_not receive(:record_update_job_error)
+        expect(checker).not_to receive(:can_update?)
+        expect(Dependabot::DependencyChangeBuilder).not_to receive(:create_from)
+        expect(service).not_to receive(:create_pull_request)
+        expect(service).not_to receive(:record_update_job_error)
         expect(Dependabot.logger)
           .to receive(:info)
           .with("Pull request already exists for dummy-pkg-b " \
@@ -1006,9 +929,9 @@ RSpec.describe Dependabot::Updater do
 
         expect(checker).to receive(:up_to_date?).and_return(false, false)
         expect(checker).to receive(:can_update?).and_return(true, false)
-        expect(Dependabot::DependencyChangeBuilder).to_not receive(:create_from)
-        expect(service).to_not receive(:create_pull_request)
-        expect(service).to_not receive(:record_update_job_error)
+        expect(Dependabot::DependencyChangeBuilder).not_to receive(:create_from)
+        expect(service).not_to receive(:create_pull_request)
+        expect(service).not_to receive(:record_update_job_error)
         expect(Dependabot.logger)
           .to receive(:info)
           .with("Pull request already exists for dummy-pkg-b@1.2.0")
@@ -1019,7 +942,8 @@ RSpec.describe Dependabot::Updater do
 
     context "when a security update PR exists for the resolved version" do
       it "creates an update job error and short-circuits" do
-        checker = stub_update_checker(latest_version: Gem::Version.new("1.3.0"), vulnerable?: true)
+        checker = stub_update_checker(latest_version: Gem::Version.new("1.3.0"),
+                                      vulnerable?: true, conflicting_dependencies: [])
 
         job = build_job(
           requested_dependencies: ["dummy-pkg-b"],
@@ -1044,8 +968,8 @@ RSpec.describe Dependabot::Updater do
 
         expect(checker).to receive(:up_to_date?).and_return(false)
         expect(checker).to receive(:can_update?).and_return(true)
-        expect(Dependabot::DependencyChangeBuilder).to_not receive(:create_from)
-        expect(service).to_not receive(:create_pull_request)
+        expect(Dependabot::DependencyChangeBuilder).not_to receive(:create_from)
+        expect(service).not_to receive(:create_pull_request)
         expect(service).to receive(:record_update_job_error)
           .with(
             error_type: "pull_request_exists_for_security_update",
@@ -1089,9 +1013,9 @@ RSpec.describe Dependabot::Updater do
         service = build_service
         updater = build_updater(service: service, job: job)
 
-        expect(checker).to_not receive(:can_update?)
-        expect(Dependabot::DependencyChangeBuilder).to_not receive(:create_from)
-        expect(service).to_not receive(:create_pull_request)
+        expect(checker).not_to receive(:can_update?)
+        expect(Dependabot::DependencyChangeBuilder).not_to receive(:create_from)
+        expect(service).not_to receive(:create_pull_request)
         expect(service).to receive(:record_update_job_error)
           .with(
             error_type: "pull_request_exists_for_latest_version",
@@ -1139,6 +1063,7 @@ RSpec.describe Dependabot::Updater do
           stub_update_checker(
             latest_version: Gem::Version.new("1.3.0"),
             vulnerable?: true,
+            conflicting_dependencies: [],
             updated_dependencies: [
               Dependabot::Dependency.new(
                 name: "dummy-pkg-b",
@@ -1190,8 +1115,8 @@ RSpec.describe Dependabot::Updater do
 
         expect(checker).to receive(:up_to_date?).and_return(false)
         expect(checker).to receive(:can_update?).and_return(true)
-        expect(Dependabot::DependencyChangeBuilder).to_not receive(:create_from)
-        expect(service).to_not receive(:create_pull_request)
+        expect(Dependabot::DependencyChangeBuilder).not_to receive(:create_from)
+        expect(service).not_to receive(:create_pull_request)
         expect(service).to receive(:record_update_job_error)
           .with(
             error_type: "pull_request_exists_for_security_update",
@@ -1216,7 +1141,7 @@ RSpec.describe Dependabot::Updater do
     end
 
     context "when a list of dependencies is specified" do
-      context "and the job is to update a PR" do
+      context "when the job is to update a PR" do
         it "only attempts to update dependencies on the specified list" do
           stub_update_checker
 
@@ -1399,7 +1324,7 @@ RSpec.describe Dependabot::Updater do
             updater.run
           end
 
-          context "for a different version" do
+          context "when dealing with a different version" do
             it "updates the dependency" do
               stub_update_checker
 
@@ -1444,10 +1369,39 @@ RSpec.describe Dependabot::Updater do
         end
       end
 
-      context "and the job is create a security PR" do
-        context "when the dependency is vulnerable" do
+      context "when the job is to create a security PR" do
+        context "when the dependency is vulnerable and there is no conflicting dependencies" do
           it "creates the pull request" do
-            stub_update_checker(vulnerable?: true)
+            stub_update_checker(vulnerable?: true, conflicting_dependencies: [])
+
+            job = build_job(
+              requested_dependencies: ["dummy-pkg-b"],
+              security_advisories: [
+                {
+                  "dependency-name" => "dummy-pkg-b",
+                  "affected-versions" => ["1.1.0"]
+                }
+              ],
+              security_updates_only: true,
+              updating_a_pull_request: false
+            )
+            service = build_service
+            updater = build_updater(service: service, job: job)
+
+            expect(service).to receive(:create_pull_request)
+
+            updater.run
+          end
+        end
+
+        context "when the dependency is vulnerable and there is a conflicting dependencies" do
+          it "creates the pull request" do
+            conflict = [{ "explanation" => "dummy-pkg-a@10.0.0 requires dummy-pkg-b@1.1.0",
+                          "name" => "dummy-pkg-a",
+                          "version" => "10.0.0",
+                          "requirement" => "1.1.0" }]
+            stub_update_checker(vulnerable?: true,
+                                conflicting_dependencies: conflict)
 
             job = build_job(
               requested_dependencies: ["dummy-pkg-b"],
@@ -1528,7 +1482,7 @@ RSpec.describe Dependabot::Updater do
             service = build_service
             updater = build_updater(service: service, job: job)
 
-            expect(service).to_not receive(:create_pull_request)
+            expect(service).not_to receive(:create_pull_request)
             expect(service).to receive(:record_update_job_error).with(
               {
                 error_type: "security_update_not_needed",
@@ -1565,7 +1519,7 @@ RSpec.describe Dependabot::Updater do
             service = build_service
             updater = build_updater(service: service, job: job)
 
-            expect(service).to_not receive(:close_pull_request)
+            expect(service).not_to receive(:close_pull_request)
 
             updater.run
           end
@@ -1573,7 +1527,7 @@ RSpec.describe Dependabot::Updater do
 
         context "when the dependency name case doesn't match what's parsed" do
           it "still updates dependencies on the specified list" do
-            stub_update_checker(vulnerable?: true)
+            stub_update_checker(vulnerable?: true, conflicting_dependencies: [])
 
             job = build_job(
               requested_dependencies: ["Dummy-pkg-b"],
@@ -1598,12 +1552,16 @@ RSpec.describe Dependabot::Updater do
       end
     end
 
-    context "when an unknown error is raised while updating dependencies (cloud) " do
+    context "when an unknown error is raised while updating dependencies (cloud)" do
       before do
-        allow(Dependabot::Experiments).to receive(:enabled?).with(:record_update_job_unknown_error).and_return(true)
+        Dependabot::Experiments.register(:record_update_job_unknown_error, true)
       end
 
-      it "tells Sentry" do
+      after do
+        Dependabot::Experiments.reset!
+      end
+
+      it "reports the error" do
         allow(Dependabot.logger).to receive(:error)
         checker = stub_update_checker
         error = StandardError.new("hell")
@@ -1614,7 +1572,7 @@ RSpec.describe Dependabot::Updater do
         service = build_service
         updater = build_updater(service: service, job: job)
 
-        expect(Raven).to receive(:capture_exception).once
+        expect(service).to receive(:capture_exception).once
 
         updater.run
       end
@@ -1660,7 +1618,7 @@ RSpec.describe Dependabot::Updater do
       end
 
       context "when Dependabot::DependencyFileNotResolvable is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::DependencyFileNotResolvable.new("message")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -1670,7 +1628,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -1698,7 +1656,7 @@ RSpec.describe Dependabot::Updater do
       end
 
       context "when Dependabot::DependencyFileNotEvaluatable is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::DependencyFileNotEvaluatable.new("message")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -1708,7 +1666,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -1736,7 +1694,7 @@ RSpec.describe Dependabot::Updater do
       end
 
       context "when Dependabot::InconsistentRegistryResponse is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::InconsistentRegistryResponse.new("message")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -1746,7 +1704,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -1761,14 +1719,14 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(service).to_not receive(:record_update_job_error)
+          expect(service).not_to receive(:record_update_job_error)
 
           updater.run
         end
       end
 
       context "when Dependabot::GitDependenciesNotReachable is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::GitDependenciesNotReachable.new("https://example.com")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -1778,7 +1736,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -1806,7 +1764,7 @@ RSpec.describe Dependabot::Updater do
       end
 
       context "when Dependabot::GitDependencyReferenceNotFound is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::GitDependencyReferenceNotFound.new("some_dep")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -1816,7 +1774,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -1844,7 +1802,7 @@ RSpec.describe Dependabot::Updater do
       end
 
       context "when Dependabot::GoModulePathMismatch is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::GoModulePathMismatch.new("/go.mod", "foo", "bar")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -1854,7 +1812,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -1886,7 +1844,7 @@ RSpec.describe Dependabot::Updater do
       end
 
       context "when Dependabot::PrivateSourceAuthenticationFailure is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::PrivateSourceAuthenticationFailure.new("some.example.com")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -1896,7 +1854,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -1947,18 +1905,19 @@ RSpec.describe Dependabot::Updater do
             .with(
               error_type: "unknown_error",
               error_details: {
-                "error-backtrace" => an_instance_of(String),
-                "error-message" => "Potentially sensitive log content goes here",
-                "error-class" => "Dependabot::SharedHelpers::HelperSubprocessFailed",
-                "package-manager" => "bundler",
-                "job-id" => 1,
-                "job-dependency_group" => []
+                Dependabot::ErrorAttributes::BACKTRACE => an_instance_of(String),
+                Dependabot::ErrorAttributes::MESSAGE => "Potentially sensitive log content goes here",
+                Dependabot::ErrorAttributes::CLASS => "Dependabot::SharedHelpers::HelperSubprocessFailed",
+                Dependabot::ErrorAttributes::FINGERPRINT => anything,
+                Dependabot::ErrorAttributes::PACKAGE_MANAGER => "bundler",
+                Dependabot::ErrorAttributes::JOB_ID => "1",
+                Dependabot::ErrorAttributes::DEPENDENCY_GROUPS => []
               }
             )
           updater.run
         end
 
-        it "notifies Sentry with a breadcrumb to check the logs" do
+        it "notifies the service with a breadcrumb to check in the logs" do
           checker = stub_update_checker
           error =
             Dependabot::SharedHelpers::HelperSubprocessFailed.new(
@@ -1972,9 +1931,14 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven)
+          expect(service)
             .to receive(:capture_exception)
-            .with(instance_of(Dependabot::Updater::SubprocessFailed), anything)
+            .with(
+              hash_including(
+                error: instance_of(Dependabot::Updater::SubprocessFailed),
+                job: job
+              )
+            )
 
           updater.run
         end
@@ -1983,10 +1947,14 @@ RSpec.describe Dependabot::Updater do
 
     context "when an unknown error is raised while updating dependencies (ghes)" do
       before do
-        allow(Dependabot::Experiments).to receive(:enabled?).with(:record_update_job_unknown_error).and_return(false)
+        Dependabot::Experiments.register(:record_update_job_unknown_error, false)
       end
 
-      it "tells Sentry" do
+      after do
+        Dependabot::Experiments.reset!
+      end
+
+      it "reports the error" do
         allow(Dependabot.logger).to receive(:error)
         checker = stub_update_checker
         error = StandardError.new("hell")
@@ -1997,7 +1965,7 @@ RSpec.describe Dependabot::Updater do
         service = build_service
         updater = build_updater(service: service, job: job)
 
-        expect(Raven).to receive(:capture_exception).once
+        expect(service).to receive(:capture_exception).once
 
         updater.run
       end
@@ -2043,7 +2011,7 @@ RSpec.describe Dependabot::Updater do
       end
 
       context "when Dependabot::DependencyFileNotResolvable is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::DependencyFileNotResolvable.new("message")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -2053,7 +2021,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -2081,7 +2049,7 @@ RSpec.describe Dependabot::Updater do
       end
 
       context "when Dependabot::DependencyFileNotEvaluatable is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::DependencyFileNotEvaluatable.new("message")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -2091,7 +2059,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -2119,7 +2087,7 @@ RSpec.describe Dependabot::Updater do
       end
 
       context "when Dependabot::InconsistentRegistryResponse is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::InconsistentRegistryResponse.new("message")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -2129,7 +2097,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -2144,14 +2112,52 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(service).to_not receive(:record_update_job_error)
+          expect(service).not_to receive(:record_update_job_error)
+
+          updater.run
+        end
+      end
+
+      context "when Dependabot::PrivateSourceAuthenticationFailure is raised with Unauthenticated message" do
+        it "doesn't report the error to the service" do
+          checker = stub_update_checker
+          error = Dependabot::PrivateSourceAuthenticationFailure.new("npm.fury.io")
+          values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
+          allow(checker).to receive(:can_update?) { values.shift.call }
+
+          job = build_job
+          service = build_service
+          updater = build_updater(service: service, job: job)
+
+          expect(service).not_to receive(:capture_exception)
+
+          updater.run
+        end
+
+        it "tells the main backend" do
+          checker = stub_update_checker
+          error = Dependabot::PrivateSourceAuthenticationFailure.new("npm.fury.io")
+          values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
+          allow(checker).to receive(:can_update?) { values.shift.call }
+
+          job = build_job
+          service = build_service
+          updater = build_updater(service: service, job: job)
+
+          expect(service)
+            .to receive(:record_update_job_error)
+            .with(
+              error_type: "private_source_authentication_failure",
+              error_details: { source: "npm.fury.io" },
+              dependency: an_instance_of(Dependabot::Dependency)
+            )
 
           updater.run
         end
       end
 
       context "when Dependabot::GitDependenciesNotReachable is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::GitDependenciesNotReachable.new("https://example.com")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -2161,7 +2167,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -2188,8 +2194,46 @@ RSpec.describe Dependabot::Updater do
         end
       end
 
+      context "when URI::InvalidURIError is raised" do
+        it "doesn't report the error to the service" do
+          checker = stub_update_checker
+          error = URI::InvalidURIError.new("https://registry.yarnpkg.com}/")
+          values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
+          allow(checker).to receive(:can_update?) { values.shift.call }
+
+          job = build_job
+          service = build_service
+          updater = build_updater(service: service, job: job)
+
+          expect(service).not_to receive(:capture_exception)
+
+          updater.run
+        end
+
+        it "tells the main backend" do
+          checker = stub_update_checker
+          error = URI::InvalidURIError.new("https://registry.yarnpkg.com}/")
+          values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
+          allow(checker).to receive(:can_update?) { values.shift.call }
+
+          job = build_job
+          service = build_service
+          updater = build_updater(service: service, job: job)
+
+          expect(service)
+            .to receive(:record_update_job_error)
+            .with(
+              error_type: "dependency_file_not_resolvable",
+              error_details: { message: "https://registry.yarnpkg.com}/" },
+              dependency: an_instance_of(Dependabot::Dependency)
+            )
+
+          updater.run
+        end
+      end
+
       context "when Dependabot::GitDependencyReferenceNotFound is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::GitDependencyReferenceNotFound.new("some_dep")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -2199,7 +2243,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -2227,7 +2271,7 @@ RSpec.describe Dependabot::Updater do
       end
 
       context "when Dependabot::GoModulePathMismatch is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::GoModulePathMismatch.new("/go.mod", "foo", "bar")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -2237,7 +2281,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -2269,7 +2313,7 @@ RSpec.describe Dependabot::Updater do
       end
 
       context "when Dependabot::PrivateSourceAuthenticationFailure is raised" do
-        it "doesn't tell Sentry" do
+        it "doesn't report the error to the service" do
           checker = stub_update_checker
           error = Dependabot::PrivateSourceAuthenticationFailure.new("some.example.com")
           values = [-> { raise error }, -> { true }, -> { true }, -> { true }]
@@ -2279,7 +2323,7 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven).to_not receive(:capture_exception)
+          expect(service).not_to receive(:capture_exception)
 
           updater.run
         end
@@ -2335,7 +2379,7 @@ RSpec.describe Dependabot::Updater do
           updater.run
         end
 
-        it "notifies Sentry with a breadcrumb to check the logs" do
+        it "notifies the service with a breadcrumb to check in the logs" do
           checker = stub_update_checker
           error =
             Dependabot::SharedHelpers::HelperSubprocessFailed.new(
@@ -2349,9 +2393,14 @@ RSpec.describe Dependabot::Updater do
           service = build_service
           updater = build_updater(service: service, job: job)
 
-          expect(Raven)
+          expect(service)
             .to receive(:capture_exception)
-            .with(instance_of(Dependabot::Updater::SubprocessFailed), anything)
+            .with(
+              hash_including(
+                error: instance_of(Dependabot::Updater::SubprocessFailed),
+                job: job
+              )
+            )
 
           updater.run
         end
@@ -2398,15 +2447,7 @@ RSpec.describe Dependabot::Updater do
             )
           ],
           repo_contents_path: nil,
-          credentials: [
-            {
-              "type" => "git_source",
-              "host" => "github.com",
-              "username" => "x-access-token",
-              "password" => "github-token"
-            },
-            { "type" => "random", "secret" => "codes" }
-          ],
+          credentials: anything,
           options: { large_hadron_collider: true }
         ).and_call_original
 
@@ -2751,14 +2792,17 @@ RSpec.describe Dependabot::Updater do
       mark_job_as_processed: nil,
       record_update_job_error: nil,
       record_update_job_unknown_error: nil,
-      increment_metric: nil
+      increment_metric: nil,
+      record_ecosystem_meta: nil
     )
+    allow(api_client).to receive(:is_a?).with(Dependabot::ApiClient).and_return(true)
 
     service = Dependabot::Service.new(
       client: api_client
     )
     allow(service).to receive(:record_update_job_error)
     allow(service).to receive(:record_update_job_unknown_error)
+    allow(service).to receive(:is_a?).with(Dependabot::Service).and_return(true)
 
     service
   end
@@ -2769,7 +2813,7 @@ RSpec.describe Dependabot::Updater do
                 updating_a_pull_request: false, security_updates_only: false, dependency_groups: [],
                 lockfile_only: false, repo_contents_path: nil)
     Dependabot::Job.new(
-      id: 1,
+      id: "1",
       token: "token",
       dependencies: requested_dependencies,
       allowed_updates: allowed_updates,

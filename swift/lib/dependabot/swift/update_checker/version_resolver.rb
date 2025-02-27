@@ -31,7 +31,7 @@ module Dependabot
             credentials: credentials
           ).updated_lockfile_content
 
-          return if updated_lockfile_content == lockfile.content
+          return if lockfile && updated_lockfile_content == lockfile.content
 
           updated_lockfile = DependencyFile.new(
             name: "Package.resolved",
@@ -46,13 +46,17 @@ module Dependabot
 
         def dependency_parser(manifest, lockfile)
           FileParser::DependencyParser.new(
-            dependency_files: [manifest, lockfile],
+            dependency_files: [manifest, lockfile].compact,
             repo_contents_path: repo_contents_path,
             credentials: credentials
           )
         end
 
-        attr_reader :dependency, :manifest, :lockfile, :repo_contents_path, :credentials
+        attr_reader :dependency
+        attr_reader :manifest
+        attr_reader :lockfile
+        attr_reader :repo_contents_path
+        attr_reader :credentials
       end
     end
   end

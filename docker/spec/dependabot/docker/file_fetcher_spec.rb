@@ -6,25 +6,6 @@ require "dependabot/docker/file_fetcher"
 require_common_spec "file_fetchers/shared_examples_for_file_fetchers"
 
 RSpec.describe Dependabot::Docker::FileFetcher do
-  it_behaves_like "a dependency file fetcher"
-
-  let(:source) do
-    Dependabot::Source.new(
-      provider: "github",
-      repo: "gocardless/bump",
-      directory: directory
-    )
-  end
-  let(:file_fetcher_instance) do
-    described_class.new(
-      source: source,
-      credentials: credentials,
-      repo_contents_path: nil
-    )
-  end
-  let(:directory) { "/" }
-  let(:github_url) { "https://api.github.com/" }
-  let(:url) { github_url + "repos/gocardless/bump/contents/" }
   let(:credentials) do
     [{
       "type" => "git_source",
@@ -32,6 +13,23 @@ RSpec.describe Dependabot::Docker::FileFetcher do
       "username" => "x-access-token",
       "password" => "token"
     }]
+  end
+  let(:url) { github_url + "repos/gocardless/bump/contents/" }
+  let(:github_url) { "https://api.github.com/" }
+  let(:directory) { "/" }
+  let(:file_fetcher_instance) do
+    described_class.new(
+      source: source,
+      credentials: credentials,
+      repo_contents_path: nil
+    )
+  end
+  let(:source) do
+    Dependabot::Source.new(
+      provider: "github",
+      repo: "gocardless/bump",
+      directory: directory
+    )
   end
 
   before { allow(file_fetcher_instance).to receive(:commit).and_return("sha") }
@@ -70,9 +68,19 @@ RSpec.describe Dependabot::Docker::FileFetcher do
           body: dockerfile_fixture,
           headers: { "content-type" => "application/json" }
         )
+
+      stub_request(:get, File.join(url, "docker-compose.yml?ref=sha"))
+        .with(headers: { "Authorization" => "token token" })
+        .to_return(
+          status: 200,
+          body: dockerfile_fixture,
+          headers: { "content-type" => "application/json" }
+        )
     end
 
-    let(:dockerfile_fixture) { fixture("github", "contents_dockerfile.json") }
+    let(:dockerfile_fixture) do
+      fixture("github", "contents_dockerfile.json")
+    end
 
     it "fetches the Dockerfile" do
       expect(file_fetcher_instance.files.count).to eq(1)
@@ -80,7 +88,7 @@ RSpec.describe Dependabot::Docker::FileFetcher do
         .to match_array(%w(Dockerfile))
     end
 
-    context "that has an invalid encoding" do
+    context "when an invalid encoding is present" do
       let(:dockerfile_fixture) { fixture("github", "contents_image.json") }
 
       it "raises a helpful error" do
@@ -113,24 +121,49 @@ RSpec.describe Dependabot::Docker::FileFetcher do
           body: dockerfile_2_fixture,
           headers: { "content-type" => "application/json" }
         )
+      stub_request(:get, File.join(url, "Containerfile?ref=sha"))
+        .with(headers: { "Authorization" => "token token" })
+        .to_return(
+          status: 200,
+          body: dockerfile_fixture,
+          headers: { "content-type" => "application/json" }
+        )
+      stub_request(:get, File.join(url, "docker-compose.yml?ref=sha"))
+        .with(headers: { "Authorization" => "token token" })
+        .to_return(
+          status: 200,
+          body: dockerfile_fixture,
+          headers: { "content-type" => "application/json" }
+        )
+      stub_request(:get, File.join(url, "docker-compose.override.yml?ref=sha"))
+        .with(headers: { "Authorization" => "token token" })
+        .to_return(
+          status: 200,
+          body: dockerfile_fixture,
+          headers: { "content-type" => "application/json" }
+        )
     end
 
-    let(:dockerfile_fixture) { fixture("github", "contents_dockerfile.json") }
-    let(:dockerfile_2_fixture) { fixture("github", "contents_dockerfile.json") }
+    let(:dockerfile_fixture) do
+      fixture("github", "contents_dockerfile.json")
+    end
+    let(:dockerfile_2_fixture) do
+      fixture("github", "contents_dockerfile.json")
+    end
 
     it "fetches both Dockerfiles" do
-      expect(file_fetcher_instance.files.count).to eq(2)
+      expect(file_fetcher_instance.files.count).to eq(3)
       expect(file_fetcher_instance.files.map(&:name))
-        .to match_array(%w(Dockerfile Dockerfile-base))
+        .to match_array(%w(Dockerfile Dockerfile-base Containerfile))
     end
 
-    context "one of which has an invalid encoding" do
+    context "when an invalid encoding is present" do
       let(:dockerfile_2_fixture) { fixture("github", "contents_image.json") }
 
       it "fetches the first Dockerfile, and ignores the invalid one" do
-        expect(file_fetcher_instance.files.count).to eq(1)
+        expect(file_fetcher_instance.files.count).to eq(2)
         expect(file_fetcher_instance.files.map(&:name))
-          .to match_array(%w(Dockerfile))
+          .to match_array(%w(Dockerfile Containerfile))
       end
     end
   end
@@ -146,6 +179,14 @@ RSpec.describe Dependabot::Docker::FileFetcher do
         )
 
       stub_request(:get, File.join(url, "Dockerfile-base?ref=sha"))
+        .with(headers: { "Authorization" => "token token" })
+        .to_return(
+          status: 200,
+          body: fixture("github", "contents_dockerfile.json"),
+          headers: { "content-type" => "application/json" }
+        )
+
+      stub_request(:get, File.join(url, "docker-compose.override.yml?ref=sha"))
         .with(headers: { "Authorization" => "token token" })
         .to_return(
           status: 200,
@@ -207,7 +248,7 @@ RSpec.describe Dependabot::Docker::FileFetcher do
         .to match_array(%w(pod.yaml))
     end
 
-    context "that has an invalid encoding" do
+    context "when an invalid encoding is present" do
       let(:kubernetes_fixture) { fixture("github", "contents_image.json") }
 
       it "raises a helpful error" do
@@ -216,7 +257,7 @@ RSpec.describe Dependabot::Docker::FileFetcher do
       end
     end
 
-    context "that has an non-kubernetes YAML" do
+    context "when an non-kubernetes YAML is present" do
       let(:kubernetes_fixture) { fixture("github", "contents_other_yaml.json") }
 
       it "raises a helpful error" do
@@ -260,7 +301,7 @@ RSpec.describe Dependabot::Docker::FileFetcher do
         .to match_array(%w(deployment.yaml pod.yaml))
     end
 
-    context "one of which has an invalid encoding" do
+    context "when an invalid encoding is present" do
       let(:kubernetes_2_fixture) { fixture("github", "contents_image.json") }
 
       it "fetches the first yaml, and ignores the invalid one" do
@@ -272,6 +313,8 @@ RSpec.describe Dependabot::Docker::FileFetcher do
 
     context "with a Helm values file" do
       matching_filenames = [
+        "other.values.yml",
+        "other.values.yaml",
         "other-values.yml",
         "other-values.yaml",
         "other_values.yml",

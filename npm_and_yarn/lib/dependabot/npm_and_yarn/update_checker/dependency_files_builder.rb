@@ -15,7 +15,7 @@ module Dependabot
         end
 
         def write_temporary_dependency_files
-          write_lock_files
+          write_lockfiles
 
           if Helpers.yarn_berry?(yarn_locks.first)
             File.write(".yarnrc.yml", yarnrc_yml_content) if yarnrc_yml_file
@@ -49,6 +49,12 @@ module Dependabot
             .select { |f| f.name.end_with?("pnpm-lock.yaml") }
         end
 
+        def bun_locks
+          @bun_locks ||=
+            dependency_files
+            .select { |f| f.name.end_with?("bun.lock") }
+        end
+
         def root_yarn_lock
           @root_yarn_lock ||=
             dependency_files
@@ -61,6 +67,12 @@ module Dependabot
             .find { |f| f.name == "pnpm-lock.yaml" }
         end
 
+        def root_bun_lock
+          @root_bun_lock ||=
+            dependency_files
+            .find { |f| f.name == "bun.lock" }
+        end
+
         def shrinkwraps
           @shrinkwraps ||=
             dependency_files
@@ -68,7 +80,7 @@ module Dependabot
         end
 
         def lockfiles
-          [*package_locks, *shrinkwraps, *yarn_locks, *pnpm_locks]
+          [*package_locks, *shrinkwraps, *yarn_locks, *pnpm_locks, *bun_locks]
         end
 
         def package_files
@@ -79,20 +91,17 @@ module Dependabot
 
         private
 
-        attr_reader :dependency, :dependency_files, :credentials
+        attr_reader :dependency
+        attr_reader :dependency_files
+        attr_reader :credentials
 
-        def write_lock_files
+        def write_lockfiles
           yarn_locks.each do |f|
             FileUtils.mkdir_p(Pathname.new(f.name).dirname)
             File.write(f.name, prepared_yarn_lockfile_content(f.content))
           end
 
-          pnpm_locks.each do |f|
-            FileUtils.mkdir_p(Pathname.new(f.name).dirname)
-            File.write(f.name, f.content)
-          end
-
-          [*package_locks, *shrinkwraps].each do |f|
+          [*package_locks, *shrinkwraps, *pnpm_locks, *bun_locks].each do |f|
             FileUtils.mkdir_p(Pathname.new(f.name).dirname)
             File.write(f.name, f.content)
           end
@@ -112,7 +121,7 @@ module Dependabot
           return false unless yarnrc_global_registry
 
           UpdateChecker::RegistryFinder::CENTRAL_REGISTRIES.none? do |r|
-            r.include?(URI(yarnrc_global_registry).host)
+            r.include?(T.must(URI(yarnrc_global_registry).host))
           end
         end
 

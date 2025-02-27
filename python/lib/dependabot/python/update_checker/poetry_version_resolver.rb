@@ -1,4 +1,4 @@
-# typed: false
+# typed: true
 # frozen_string_literal: true
 
 require "excon"
@@ -14,7 +14,6 @@ require "dependabot/python/file_updater/pyproject_preparer"
 require "dependabot/python/update_checker"
 require "dependabot/python/version"
 require "dependabot/python/requirement"
-require "dependabot/python/helpers"
 require "dependabot/python/native_helpers"
 require "dependabot/python/authed_url_builder"
 require "dependabot/python/name_normaliser"
@@ -24,6 +23,9 @@ module Dependabot
     class UpdateChecker
       # This class does version resolution for pyproject.toml files.
       class PoetryVersionResolver
+        extend T::Sig
+        extend T::Helpers
+
         GIT_REFERENCE_NOT_FOUND_REGEX = /
           (Failed to checkout
           (?<tag>.+?)
@@ -39,12 +41,23 @@ module Dependabot
           \s+check\syour\sgit\sconfiguration
         /mx
 
-        attr_reader :dependency, :dependency_files, :credentials
+        INCOMPATIBLE_CONSTRAINTS = /Incompatible constraints in requirements of (?<dep>.+?) ((?<ver>.+?)):/
 
-        def initialize(dependency:, dependency_files:, credentials:)
+        attr_reader :dependency
+        attr_reader :dependency_files
+        attr_reader :credentials
+        attr_reader :repo_contents_path
+
+        sig { returns(Dependabot::Python::PoetryErrorHandler) }
+        attr_reader :error_handler
+
+        def initialize(dependency:, dependency_files:, credentials:, repo_contents_path:)
           @dependency               = dependency
           @dependency_files         = dependency_files
           @credentials              = credentials
+          @repo_contents_path       = repo_contents_path
+          @error_handler = PoetryErrorHandler.new(dependencies: dependency,
+                                                  dependency_files: dependency_files)
         end
 
         def latest_resolvable_version(requirement: nil)
@@ -110,12 +123,15 @@ module Dependabot
           raise "No version in lockfile!"
         end
 
+        # rubocop:disable Metrics/AbcSize
         def handle_poetry_errors(error)
+          error_handler.handle_poetry_error(error)
+
           if error.message.gsub(/\s/, "").match?(GIT_REFERENCE_NOT_FOUND_REGEX)
             message = error.message.gsub(/\s/, "")
             match = message.match(GIT_REFERENCE_NOT_FOUND_REGEX)
             name = if (url = match.named_captures.fetch("url"))
-                     File.basename(URI.parse(url).path)
+                     File.basename(T.must(URI.parse(url).path))
                    else
                      message.match(GIT_REFERENCE_NOT_FOUND_REGEX)
                             .named_captures.fetch("name")
@@ -143,6 +159,7 @@ module Dependabot
           # change then we want to hear about it
           raise
         end
+        # rubocop:enable Metrics/AbcSize
 
         # Using `--lock` avoids doing an install.
         # Using `--no-interaction` avoids asking for passwords.
@@ -309,13 +326,154 @@ module Dependabot
         end
 
         def run_poetry_command(command, fingerprint: nil)
-          Helpers.run_poetry_command(command, fingerprint: fingerprint)
+          SharedHelpers.run_shell_command(command, fingerprint: fingerprint)
         end
 
         def normalise(name)
           NameNormaliser.normalise(name)
         end
       end
+    end
+
+    class PoetryErrorHandler < UpdateChecker
+      extend T::Sig
+
+      # if a valid config value is not found in project.toml file
+      INVALID_CONFIGURATION = /The Poetry configuration is invalid:(?<config>.*)/
+
+      # if .toml has incorrect version specification i.e. <0.2.0app
+      INVALID_VERSION = /Could not parse version constraint: (?<ver>.*)/
+
+      # dependency source link not accessible
+      INVALID_LINK = /No valid distribution links found for package: "(?<dep>.*)" version: "(?<ver>.*)"/
+
+      # Python version range mentioned in .toml [tool.poetry.dependencies] python = "x.x" is not satisfied by dependency
+      PYTHON_RANGE_NOT_SATISFIED = /(?<dep>.*) requires Python (?<req_ver>.*), so it will not be satisfied for Python (?<men_ver>.*)/ # rubocop:disable Layout/LineLength
+
+      # package version mentioned in .toml not found in package index
+      PACKAGE_NOT_FOUND = /Package (?<pkg>.*) ((?<req_ver>.*)) not found./
+
+      # client access error codes while accessing package index
+      CLIENT_ERROR_CODES = T.let({
+        error401: /401 Client Error/,
+        error403: /403 Client Error/,
+        error404: /404 Client Error/,
+        http403: /HTTP error 403/,
+        http404: /HTTP error 404/
+      }.freeze, T::Hash[T.nilable(String), Regexp])
+
+      # server response error codes while accessing package index
+      SERVER_ERROR_CODES = T.let({
+        server500: /500 Server Error/,
+        server502: /502 Server Error/,
+        server503: /503 Server Error/,
+        server504: /504 Server Error/
+      }.freeze, T::Hash[T.nilable(String), Regexp])
+
+      # invalid configuration in pyproject.toml
+      POETRY_VIRTUAL_ENV_CONFIG = %r{pypoetry/virtualenvs(.|\n)*list index out of range}
+
+      # error related to local project as dependency in pyproject.toml
+      ERR_LOCAL_PROJECT_PATH = /Path (?<path>.*) for (?<dep>.*) does not exist/
+
+      TIME_OUT_ERRORS = T.let({
+        time_out_max_retries: /Max retries exceeded/,
+        time_out_read_timed_out: /Read timed out/,
+        time_out_inactivity: /Timed out due to inactivity/
+      }.freeze, T::Hash[T.nilable(String), Regexp])
+
+      PACKAGE_RESOLVER_ERRORS = T.let({
+        package_info_error: /Unable to determine package info/,
+        self_dep_error: /Package '(?<path>.*)' is listed as a dependency of itself./,
+        incompatible_constraints: /Incompatible constraints in requirements/
+      }.freeze, T::Hash[T.nilable(String), Regexp])
+
+      sig do
+        params(
+          dependencies: Dependabot::Dependency,
+          dependency_files: T::Array[Dependabot::DependencyFile]
+        ).void
+      end
+      def initialize(dependencies:, dependency_files:)
+        @dependencies = dependencies
+        @dependency_files = dependency_files
+      end
+
+      private
+
+      sig { returns(Dependabot::Dependency) }
+      attr_reader :dependencies
+
+      sig { returns(T::Array[Dependabot::DependencyFile]) }
+      attr_reader :dependency_files
+
+      sig do
+        params(
+          url: T.nilable(String)
+        ).returns(String)
+      end
+      def sanitize_url(url)
+        T.must(url&.match(%r{^(?:https?://)?(?:[^@\n])?([^:/\n?]+)})).to_s
+      end
+
+      public
+
+      # rubocop:disable Metrics/AbcSize
+      # rubocop:disable Metrics/PerceivedComplexity
+      # rubocop:disable Metrics/CyclomaticComplexity
+      sig { params(error: Exception).void }
+      def handle_poetry_error(error)
+        Dependabot.logger.warn(error.message)
+
+        if (msg = error.message.match(PoetryVersionResolver::INCOMPATIBLE_CONSTRAINTS) ||
+            error.message.match(INVALID_CONFIGURATION) || error.message.match(INVALID_VERSION) ||
+            error.message.match(INVALID_LINK))
+
+          raise DependencyFileNotResolvable, msg
+        end
+
+        if (msg = error.message.match(PACKAGE_NOT_FOUND))
+          raise DependencyFileNotResolvable, msg
+        end
+
+        raise DependencyFileNotResolvable, error.message if error.message.match(PYTHON_RANGE_NOT_SATISFIED)
+
+        if error.message.match(POETRY_VIRTUAL_ENV_CONFIG) || error.message.match(ERR_LOCAL_PROJECT_PATH)
+          msg = "Error while resolving pyproject.toml file"
+
+          raise DependencyFileNotResolvable, msg
+        end
+
+        SERVER_ERROR_CODES.each do |(_error_codes, error_regex)|
+          next unless error.message.match?(error_regex)
+
+          index_url = URI.extract(error.message.to_s).last .then { sanitize_url(_1) }
+          raise InconsistentRegistryResponse, index_url
+        end
+
+        TIME_OUT_ERRORS.each do |(_error_codes, error_regex)|
+          next unless error.message.match?(error_regex)
+
+          raise InconsistentRegistryResponse, "Inconsistent registry response"
+        end
+
+        CLIENT_ERROR_CODES.each do |(_error_codes, error_regex)|
+          next unless error.message.match?(error_regex)
+
+          index_url = URI.extract(error.message.to_s).last .then { sanitize_url(_1) }
+          raise PrivateSourceAuthenticationFailure, index_url
+        end
+
+        PACKAGE_RESOLVER_ERRORS.each do |(_error_codes, error_regex)|
+          next unless error.message.match?(error_regex)
+
+          message = "Package solving failed while resolving manifest file"
+          raise DependencyFileNotResolvable, message
+        end
+      end
+      # rubocop:enable Metrics/AbcSize
+      # rubocop:enable Metrics/PerceivedComplexity
+      # rubocop:enable Metrics/CyclomaticComplexity
     end
   end
 end

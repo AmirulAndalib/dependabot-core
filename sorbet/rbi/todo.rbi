@@ -4,8 +4,8 @@
 
 # typed: false
 
-module ::Azure::Error::NotFound; end
-module Bundler::CompactIndexClient::Updater; end
 module Bundler::SolveFailure; end
-module Dependabot::NpmAndYarn::FileFetcher::Pysch::SyntaxError; end
-module Dependabot::NpmAndYarn::FileParser::DependencySet; end
+module HTTP::ConnectionError; end
+class HTTP::Client
+  def auth(value); end
+end

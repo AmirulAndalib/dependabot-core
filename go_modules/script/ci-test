@@ -1,6 +1,9 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
+pushd helpers
+go test ./...
+popd
 bundle install
 bundle exec turbo_tests --verbose

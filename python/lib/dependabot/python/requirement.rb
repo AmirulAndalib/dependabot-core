@@ -1,12 +1,17 @@
 # typed: true
 # frozen_string_literal: true
 
+require "sorbet-runtime"
+
+require "dependabot/requirement"
 require "dependabot/utils"
 require "dependabot/python/version"
 
 module Dependabot
   module Python
-    class Requirement < Gem::Requirement
+    class Requirement < Dependabot::Requirement
+      extend T::Sig
+
       OR_SEPARATOR = /(?<=[a-zA-Z0-9)*])\s*\|+/
 
       # Add equality and arbitrary-equality matchers
@@ -19,7 +24,7 @@ module Dependabot
                   .map { |k| Regexp.quote(k) }.join("|")
       version_pattern = Python::Version::VERSION_PATTERN
 
-      PATTERN_RAW = "\\s*(#{quoted})?\\s*(#{version_pattern})\\s*".freeze
+      PATTERN_RAW = "\\s*(?<op>#{quoted})?\\s*(?<version>#{version_pattern})\\s*".freeze
       PATTERN = /\A#{PATTERN_RAW}\z/
       PARENS_PATTERN = /\A\(([^)]+)\)\z/
 
@@ -36,15 +41,16 @@ module Dependabot
           raise BadRequirementError, msg
         end
 
-        return DefaultRequirement if matches[1] == ">=" && matches[2] == "0"
+        return DefaultRequirement if matches[:op] == ">=" && matches[:version] == "0"
 
-        [matches[1] || "=", Python::Version.new(matches[2])]
+        [matches[:op] || "=", Python::Version.new(T.must(matches[:version]))]
       end
 
       # Returns an array of requirements. At least one requirement from the
       # returned array must be satisfied for a version to be valid.
       #
       # NOTE: Or requirements are only valid for Poetry.
+      sig { override.params(requirement_string: T.nilable(String)).returns(T::Array[Requirement]) }
       def self.requirements_array(requirement_string)
         return [new(nil)] if requirement_string.nil?
 
@@ -52,7 +58,7 @@ module Dependabot
           requirement_string = matches[1]
         end
 
-        requirement_string.strip.split(OR_SEPARATOR).map do |req_string|
+        T.must(requirement_string).strip.split(OR_SEPARATOR).map do |req_string|
           new(req_string.strip)
         end
       end
@@ -122,7 +128,8 @@ module Dependabot
         upper_bound = parts.map.with_index do |part, i|
           if i < first_non_zero_index then part
           elsif i == first_non_zero_index then (part.to_i + 1).to_s
-          elsif i > first_non_zero_index && i == 2 then "0.a"
+          # .dev has lowest precedence: https://packaging.python.org/en/latest/specifications/version-specifiers/#summary-of-permitted-suffixes-and-relative-ordering
+          elsif i > first_non_zero_index && i == 2 then "0.dev"
           else
             0
           end
@@ -145,7 +152,7 @@ module Dependabot
                   .first(req_string.split(".").index { |s| s.include?("*") } + 1)
                   .join(".")
                   .gsub(/\*(?!$)/, "0")
-                  .gsub(/\*$/, "0.a")
+                  .gsub(/\*$/, "0.dev")
                   .tap { |s| exact_op ? s.gsub!(/^(?<!!)=*/, "~>") : s }
       end
     end

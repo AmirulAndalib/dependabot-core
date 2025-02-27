@@ -4,6 +4,7 @@
 require "toml-rb"
 require "open3"
 require "dependabot/shared_helpers"
+require "dependabot/cargo/helpers"
 require "dependabot/cargo/update_checker"
 require "dependabot/cargo/file_parser"
 require "dependabot/cargo/version"
@@ -19,6 +20,12 @@ module Dependabot
         REF_NOT_FOUND_REGEX = /#{UNABLE_TO_UPDATE}.*(#{REVSPEC_PATTERN}|#{OBJECT_PATTERN})/m
         GIT_REF_NOT_FOUND_REGEX = /Updating git repository `(?<url>[^`]*)`.*fatal: couldn't find remote ref/m
 
+        # Note that as of Rust 1.80, git error message handling in the `cargo update` command changed.
+        # This change causes the NOT_OUR_REF error to appear *before* the UNABLE_TO_UPDATE error.
+        # Issue filed in Cargo project: https://github.com/rust-lang/cargo/issues/14621
+        NOT_OUR_REF = /fatal: remote error: upload-pack: not our ref/
+        NOT_OUR_REF_REGEX = /#{NOT_OUR_REF}.*#{UNABLE_TO_UPDATE}/m
+
         def initialize(dependency:, credentials:,
                        original_dependency_files:, prepared_dependency_files:)
           @dependency = dependency
@@ -31,12 +38,16 @@ module Dependabot
           return @latest_resolvable_version if defined?(@latest_resolvable_version)
 
           @latest_resolvable_version = fetch_latest_resolvable_version
+          rescue Dependabot::SharedHelpers::HelperSubprocessFailed => e
+            raise Dependabot::DependencyFileNotResolvable, e.message
         end
 
         private
 
-        attr_reader :dependency, :credentials,
-                    :prepared_dependency_files, :original_dependency_files
+        attr_reader :dependency
+        attr_reader :credentials
+        attr_reader :prepared_dependency_files
+        attr_reader :original_dependency_files
 
         def fetch_latest_resolvable_version
           base_directory = prepared_dependency_files.first.directory
@@ -125,7 +136,6 @@ module Dependabot
             spec += ":#{git_dependency_version}" if git_dependency_version
           elsif dependency.version
             spec += ":#{dependency.version}"
-            spec = "https://github.com/rust-lang/crates.io-index#" + spec
           end
 
           spec
@@ -135,15 +145,20 @@ module Dependabot
         # so without doing an install (so it's fast).
         def run_cargo_update_command
           run_cargo_command(
-            "cargo update -p #{dependency_spec} --verbose",
-            fingerprint: "cargo update -p <dependency_spec> --verbose"
+            "cargo update -p #{dependency_spec} -vv",
+            fingerprint: "cargo update -p <dependency_spec> -vv"
           )
         end
 
         def run_cargo_command(command, fingerprint: nil)
           start = Time.now
           command = SharedHelpers.escape_command(command)
-          stdout, process = Open3.capture2e(command)
+          Helpers.setup_credentials_in_environment(credentials)
+          # Pass through any registry tokens supplied via CARGO_REGISTRIES_...
+          # environment variables, and also any CARGO_REGISTRY_... configuration.
+          env = ENV.select { |key, _value| key.match(/^(CARGO_REGISTRY|CARGO_REGISTRIES)_/) }
+
+          stdout, process = Open3.capture2e(env, command)
           time_taken = Time.now - start
 
           # Raise an error with the output from the shell session if Cargo
@@ -166,6 +181,10 @@ module Dependabot
 
           File.write(lockfile.name, lockfile.content) if lockfile
           File.write(toolchain.name, toolchain.content) if toolchain
+          return unless config
+
+          FileUtils.mkdir_p(File.dirname(config.name))
+          File.write(config.name, config.content)
         end
 
         def check_rust_workspace_root
@@ -210,7 +229,7 @@ module Dependabot
             raise Dependabot::GitDependenciesNotReachable, urls
           end
 
-          [BRANCH_NOT_FOUND_REGEX, REF_NOT_FOUND_REGEX, GIT_REF_NOT_FOUND_REGEX].each do |regex|
+          [BRANCH_NOT_FOUND_REGEX, REF_NOT_FOUND_REGEX, GIT_REF_NOT_FOUND_REGEX, NOT_OUR_REF_REGEX].each do |regex|
             next unless error.message.match?(regex)
 
             dependency_url = error.message.match(regex).named_captures.fetch("url").split(/[#?]/).first
@@ -238,16 +257,25 @@ module Dependabot
             return nil
           end
 
-          if error.message.include?("usage of sparse registries requires `-Z sparse-registry`")
+          if using_old_toolchain?(error.message)
             raise Dependabot::DependencyFileNotEvaluatable, "Dependabot only supports toolchain 1.68 and up."
           end
 
           raise Dependabot::DependencyFileNotResolvable, error.message if resolvability_error?(error.message)
 
-          raise error
+          raise
         end
         # rubocop:enable Metrics/AbcSize
         # rubocop:enable Metrics/PerceivedComplexity
+
+        def using_old_toolchain?(message)
+          return true if message.include?("usage of sparse registries requires `-Z sparse-registry`")
+
+          version_log = /rust version (?<version>\d.\d+)/.match(message)
+          return false unless version_log
+
+          version_class.new(version_log[:version]) < version_class.new("1.68")
+        end
 
         def unreachable_git_urls
           return @unreachable_git_urls if defined?(@unreachable_git_urls)
@@ -295,7 +323,11 @@ module Dependabot
           return true if message.match?(/feature `[^\`]+` is required/)
           return true if message.include?("unexpected end of input while parsing major version number")
 
-          !original_requirements_resolvable?
+          original_requirements_resolvable = original_requirements_resolvable?
+
+          return false if original_requirements_resolvable == :unknown
+
+          !original_requirements_resolvable
         end
 
         def original_requirements_resolvable?
@@ -310,13 +342,15 @@ module Dependabot
 
           true
         rescue SharedHelpers::HelperSubprocessFailed => e
-          raise unless e.message.include?("no matching version") ||
-                       e.message.include?("failed to select a version") ||
-                       e.message.include?("no matching package named") ||
-                       e.message.include?("failed to parse manifest") ||
-                       e.message.include?("failed to update submodule")
-
-          false
+          if e.message.include?("no matching version") ||
+             e.message.include?("failed to select a version") ||
+             e.message.include?("no matching package named") ||
+             e.message.include?("failed to parse manifest") ||
+             e.message.include?("failed to update submodule")
+            false
+          else
+            :unknown
+          end
         end
 
         def workspace_native_library_update_error?(message)
@@ -408,8 +442,12 @@ module Dependabot
         end
 
         def toolchain
-          @toolchain ||= prepared_dependency_files
+          @toolchain ||= original_dependency_files
                          .find { |f| f.name == "rust-toolchain" }
+        end
+
+        def config
+          @config ||= original_dependency_files.find { |f| f.name == ".cargo/config.toml" }
         end
 
         def git_dependency?

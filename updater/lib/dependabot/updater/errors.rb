@@ -1,15 +1,19 @@
-# typed: false
+# typed: strong
 # frozen_string_literal: true
 
 module Dependabot
   class Updater
     class SubprocessFailed < StandardError
-      attr_reader :raven_context
+      extend T::Sig
 
-      def initialize(message, raven_context:)
+      sig { returns(T::Hash[Symbol, T.untyped]) }
+      attr_reader :sentry_context
+
+      sig { params(message: String, sentry_context: T::Hash[Symbol, T.untyped]).void }
+      def initialize(message, sentry_context:)
         super(message)
 
-        @raven_context = raven_context
+        @sentry_context = T.let(sentry_context, T::Hash[Symbol, T.untyped])
       end
     end
   end

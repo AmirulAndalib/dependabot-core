@@ -6,20 +6,6 @@ require "dependabot/composer/file_fetcher"
 require_common_spec "file_fetchers/shared_examples_for_file_fetchers"
 
 RSpec.describe Dependabot::Composer::FileFetcher do
-  it_behaves_like "a dependency file fetcher"
-
-  let(:source) do
-    Dependabot::Source.new(
-      provider: "github",
-      repo: "gocardless/bump",
-      directory: directory
-    )
-  end
-  let(:file_fetcher_instance) do
-    described_class.new(source: source, credentials: credentials)
-  end
-  let(:directory) { "/" }
-  let(:url) { "https://api.github.com/repos/gocardless/bump/contents/" }
   let(:credentials) do
     [{
       "type" => "git_source",
@@ -27,6 +13,18 @@ RSpec.describe Dependabot::Composer::FileFetcher do
       "username" => "x-access-token",
       "password" => "token"
     }]
+  end
+  let(:url) { "https://api.github.com/repos/gocardless/bump/contents/" }
+  let(:directory) { "/" }
+  let(:file_fetcher_instance) do
+    described_class.new(source: source, credentials: credentials)
+  end
+  let(:source) do
+    Dependabot::Source.new(
+      provider: "github",
+      repo: "gocardless/bump",
+      directory: directory
+    )
   end
 
   before do
@@ -55,6 +53,8 @@ RSpec.describe Dependabot::Composer::FileFetcher do
       )
   end
 
+  it_behaves_like "a dependency file fetcher"
+
   it "fetches the composer.json and composer.lock" do
     expect(file_fetcher_instance.files.map(&:name))
       .to match_array(%w(composer.json composer.lock))
@@ -62,7 +62,7 @@ RSpec.describe Dependabot::Composer::FileFetcher do
 
   it "provides the composer version" do
     expect(file_fetcher_instance.ecosystem_versions).to eq({
-      package_managers: { "composer" => "1" }
+      package_managers: { "composer" => "2" }
     })
   end
 
@@ -86,7 +86,7 @@ RSpec.describe Dependabot::Composer::FileFetcher do
 
     it "provides the composer version" do
       expect(file_fetcher_instance.ecosystem_versions).to eq({
-        package_managers: { "composer" => "1" }
+        package_managers: { "composer" => "2" }
       })
     end
   end
@@ -144,6 +144,41 @@ RSpec.describe Dependabot::Composer::FileFetcher do
         .to raise_error(Dependabot::DependencyFileNotParseable) do |error|
           expect(error.file_name).to eq("composer.json")
         end
+    end
+  end
+
+  context "with an artifact source" do
+    before do
+      stub_request(:get, url + "composer.json?ref=sha")
+        .with(headers: { "Authorization" => "token token" })
+        .to_return(
+          status: 200,
+          body: fixture("github", "composer_json_with_artifact_deps.json"),
+          headers: { "content-type" => "application/json" }
+        )
+
+      # it's getting a listing of the artifacts directories to look for zip files
+      stub_request(:get, url + "artifacts?ref=sha")
+        .with(headers: { "Authorization" => "token token" })
+        .to_return(
+          status: 200,
+          body: fixture("github", "artifact_directory_listing.json"),
+          headers: { "content-type" => "application/json" }
+        )
+
+      # it found dependency.zip
+      stub_request(:get, url + "artifacts/dependency.zip?ref=sha")
+        .with(headers: { "Authorization" => "token token" })
+        .to_return(
+          status: 200,
+          body: fixture("github", "dependency.json"),
+          headers: { "content-type" => "application/json" }
+        )
+    end
+
+    it "fetches the .zip file and makes a .gitkeep file" do
+      expect(file_fetcher_instance.files.map(&:name))
+        .to match_array(%w(composer.json composer.lock artifacts/dependency.zip artifacts/.gitkeep))
     end
   end
 
@@ -249,6 +284,7 @@ RSpec.describe Dependabot::Composer::FileFetcher do
             headers: { "content-type" => "application/json" }
           )
       end
+
       it "fetches the composer.json, composer.lock and the path dependencies" do
         expect(file_fetcher_instance.files.map(&:name))
           .to match_array(
@@ -257,7 +293,8 @@ RSpec.describe Dependabot::Composer::FileFetcher do
           )
       end
     end
-    context "specified as a hash" do
+
+    context "when the path is specified as a hash" do
       before do
         stub_request(:get, url + "composer.json?ref=sha")
           .with(headers: { "Authorization" => "token token" })
@@ -277,7 +314,7 @@ RSpec.describe Dependabot::Composer::FileFetcher do
       end
     end
 
-    context "specified as an array with surprising entries" do
+    context "when the path is specified as an array with surprising entries" do
       before do
         stub_request(:get, url + "composer.json?ref=sha")
           .with(headers: { "Authorization" => "token token" })
@@ -297,7 +334,7 @@ RSpec.describe Dependabot::Composer::FileFetcher do
       end
     end
 
-    context "that doesn't exist but also isn't used" do
+    context "when the path is not exist and unused" do
       before do
         stub_request(:get, url + "components?ref=sha")
           .with(headers: { "Authorization" => "token token" })
@@ -309,7 +346,7 @@ RSpec.describe Dependabot::Composer::FileFetcher do
           .to match_array(%w(composer.json composer.lock))
       end
 
-      context "because there is no lockfile" do
+      context "when there is no lockfile" do
         before do
           stub_request(:get, url + "?ref=sha")
             .with(headers: { "Authorization" => "token token" })
@@ -331,7 +368,7 @@ RSpec.describe Dependabot::Composer::FileFetcher do
       end
     end
 
-    context "and a directory" do
+    context "with a directory" do
       let(:directory) { "my/app/" }
       let(:base_url) do
         "https://api.github.com/repos/gocardless/bump/contents/"
@@ -408,7 +445,7 @@ RSpec.describe Dependabot::Composer::FileFetcher do
             )
         end
 
-        context "and a path starting with '..' was specified" do
+        context "when the path specified is starting with '..'" do
           before do
             stub_request(:get, url + "composer.json?ref=sha")
               .with(headers: { "Authorization" => "token token" })
